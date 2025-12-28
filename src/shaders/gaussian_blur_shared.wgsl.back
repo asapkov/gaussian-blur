@@ -1,0 +1,253 @@
+// Gaussian Blur Compute Shader - Optimized with shared memory
+// Two-pass separable Gaussian blur
+
+struct Parameters {
+    width: u32,
+    height: u32,
+    radius: u32,
+    blur_alpha: u32,
+    sigma: f32,
+    use_shared_memory: u32,  // 1 if radius <= MAX_SHARED_RADIUS, 0 otherwise
+    _padding: vec2<f32>,
+};
+
+// Storage buffer for kernel - fastest access
+@group(0) @binding(0)
+var<storage, read> kernel: array<f32>;
+
+@group(0) @binding(1)
+var input_texture: texture_2d<f32>;
+
+@group(0) @binding(2)
+var intermediate_write: texture_storage_2d<rgba8unorm, write>;
+
+@group(0) @binding(3)
+var intermediate_read: texture_2d<f32>;
+
+@group(0) @binding(4)
+var output_texture: texture_storage_2d<rgba8unorm, write>;
+
+@group(0) @binding(5)
+var<uniform> params: Parameters;
+
+// Workgroup size
+const WORKGROUP_SIZE_X = 16u;
+const WORKGROUP_SIZE_Y = 16u;
+const TILE_WIDTH = WORKGROUP_SIZE_X;
+const TILE_HEIGHT = WORKGROUP_SIZE_Y;
+
+// Maximum radius that fits in shared memory
+const MAX_SHARED_RADIUS = 32u;
+
+// Shared memory arrays sized for maximum kernel radius
+const HORIZONTAL_SHARED_SIZE = (TILE_WIDTH + 2u * MAX_SHARED_RADIUS) * WORKGROUP_SIZE_Y;
+const VERTICAL_SHARED_SIZE = WORKGROUP_SIZE_X * (TILE_HEIGHT + 2u * MAX_SHARED_RADIUS);
+
+var<workgroup> horizontal_shared: array<vec4<f32>, HORIZONTAL_SHARED_SIZE>;
+var<workgroup> vertical_shared: array<vec4<f32>, VERTICAL_SHARED_SIZE>;
+
+// Helper function to get shared memory index
+fn get_horizontal_shared_idx(local_x: u32, local_y: u32, radius: u32) -> u32 {
+    let shared_width = TILE_WIDTH + 2u * radius;
+    return local_y * shared_width + local_x;
+}
+
+fn get_vertical_shared_idx(local_x: u32, local_y: u32, radius: u32) -> u32 {
+    let shared_height = TILE_HEIGHT + 2u * radius;
+    return local_x * shared_height + local_y;
+}
+
+// Horizontal pass with shared memory optimization
+fn horizontal_pass_shared(
+    local_id: vec3<u32>,
+    workgroup_id: vec3<u32>
+) {
+    let radius = params.radius;
+    let padding = radius;
+    
+    // Calculate tile boundaries
+    let tile_start_x = workgroup_id.x * TILE_WIDTH;
+    let tile_start_y = workgroup_id.y * TILE_HEIGHT;
+    
+    // Load data into shared memory with padding
+    for (var i = 0u; i < (TILE_WIDTH + 2u * padding + WORKGROUP_SIZE_X - 1u) / WORKGROUP_SIZE_X; i++) {
+        let load_x = i32(tile_start_x) + i32(local_id.x + i * WORKGROUP_SIZE_X) - i32(padding);
+        let load_y = i32(tile_start_y) + i32(local_id.y);
+        
+        if (load_x >= 0 && load_x < i32(params.width) &&
+            load_y >= 0 && load_y < i32(params.height)) {
+            let shared_idx = get_horizontal_shared_idx(
+                local_id.x + i * WORKGROUP_SIZE_X,
+                local_id.y,
+                padding
+            );
+            horizontal_shared[shared_idx] = textureLoad(
+                input_texture,
+                vec2<i32>(load_x, load_y),
+                0
+            );
+        }
+    }
+    
+    workgroupBarrier();
+    
+    // Process tile pixels
+    if (local_id.x < TILE_WIDTH) {
+        let output_x = tile_start_x + local_id.x;
+        let output_y = tile_start_y + local_id.y;
+        
+        if (output_x < params.width && output_y < params.height) {
+            var sum = vec4<f32>(0.0);
+            let shared_start_idx = get_horizontal_shared_idx(local_id.x, local_id.y, padding);
+            
+            for (var k = 0u; k <= 2u * radius; k++) {
+                sum += horizontal_shared[shared_start_idx + k] * kernel[k];
+            }
+            
+            textureStore(intermediate_write, vec2<u32>(output_x, output_y), sum);
+        }
+    }
+}
+
+// Horizontal pass using global memory for large kernels
+fn horizontal_pass_global(global_id: vec3<u32>) {
+    let radius = params.radius;
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    var sum = vec4<f32>(0.0);
+    let start_x = i32(x) - i32(radius);
+    
+    for (var k = 0u; k <= 2u * radius; k++) {
+        let sample_x = clamp(start_x + i32(k), 0, i32(params.width) - 1);
+        sum += textureLoad(input_texture, vec2<i32>(sample_x, i32(y)), 0) * kernel[k];
+    }
+    
+    textureStore(intermediate_write, vec2<u32>(x, y), sum);
+}
+
+// Vertical pass with shared memory optimization
+fn vertical_pass_shared(
+    local_id: vec3<u32>,
+    workgroup_id: vec3<u32>
+) {
+    let radius = params.radius;
+    let padding = radius;
+    
+    // Calculate tile boundaries
+    let tile_start_x = workgroup_id.x * TILE_WIDTH;
+    let tile_start_y = workgroup_id.y * TILE_HEIGHT;
+    
+    // Load data into shared memory with padding
+    for (var i = 0u; i < (TILE_HEIGHT + 2u * padding + WORKGROUP_SIZE_Y - 1u) / WORKGROUP_SIZE_Y; i++) {
+        let load_x = i32(tile_start_x) + i32(local_id.x);
+        let load_y = i32(tile_start_y) + i32(local_id.y + i * WORKGROUP_SIZE_Y) - i32(padding);
+        
+        if (load_x >= 0 && load_x < i32(params.width) &&
+            load_y >= 0 && load_y < i32(params.height)) {
+            let shared_idx = get_vertical_shared_idx(
+                local_id.x,
+                local_id.y + i * WORKGROUP_SIZE_Y,
+                padding
+            );
+            vertical_shared[shared_idx] = textureLoad(
+                intermediate_read,
+                vec2<i32>(load_x, load_y),
+                0
+            );
+        }
+    }
+    
+    workgroupBarrier();
+    
+    // Process tile pixels
+    if (local_id.y < TILE_HEIGHT) {
+        let output_x = tile_start_x + local_id.x;
+        let output_y = tile_start_y + local_id.y;
+        
+        if (output_x < params.width && output_y < params.height) {
+            var sum = vec4<f32>(0.0);
+            let shared_start_idx = get_vertical_shared_idx(local_id.x, local_id.y, padding);
+            
+            for (var k = 0u; k <= 2u * radius; k++) {
+                sum += vertical_shared[shared_start_idx + k] * kernel[k];
+            }
+            
+            // Apply alpha preservation if needed
+            var result = sum;
+            if (params.blur_alpha == 0u) {
+                let original = textureLoad(
+                    input_texture,
+                    vec2<i32>(i32(output_x), i32(output_y)),
+                    0
+                );
+                result.a = original.a;
+            }
+            
+            textureStore(output_texture, vec2<u32>(output_x, output_y), clamp(result, vec4<f32>(0.0), vec4<f32>(1.0)));
+        }
+    }
+}
+
+// Vertical pass using global memory for large kernels
+fn vertical_pass_global(global_id: vec3<u32>) {
+    let radius = params.radius;
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    var sum = vec4<f32>(0.0);
+    let start_y = i32(y) - i32(radius);
+    
+    for (var k = 0u; k <= 2u * radius; k++) {
+        let sample_y = clamp(start_y + i32(k), 0, i32(params.height) - 1);
+        sum += textureLoad(intermediate_read, vec2<i32>(i32(x), sample_y), 0) * kernel[k];
+    }
+    
+    // Apply alpha preservation if needed
+    var result = sum;
+    if (params.blur_alpha == 0u) {
+        let original = textureLoad(
+            input_texture,
+            vec2<i32>(i32(x), i32(y)),
+            0
+        );
+        result.a = original.a;
+    }
+    
+    textureStore(output_texture, vec2<u32>(x, y), clamp(result, vec4<f32>(0.0), vec4<f32>(1.0)));
+}
+
+// Main entry points
+@compute @workgroup_size(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, 1)
+fn horizontal_pass(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+    if (params.use_shared_memory == 1u) {
+        horizontal_pass_shared(local_id, workgroup_id);
+    } else {
+        horizontal_pass_global(global_id);
+    }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, 1)
+fn vertical_pass(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+    if (params.use_shared_memory == 1u) {
+        vertical_pass_shared(local_id, workgroup_id);
+    } else {
+        vertical_pass_global(global_id);
+    }
+}

@@ -1,0 +1,132 @@
+Chus@Fukurou:~/Tmp/gaussian-blur$ cargo clean
+     Removed 1196 files, 285.9MiB total
+Chus@Fukurou:~/Tmp/gaussian-blur$ cargo build --release
+   Compiling crossbeam-utils v0.8.21
+   Compiling rayon-core v1.13.0
+   Compiling libc v0.2.178
+   Compiling either v1.15.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-deque v0.8.6
+   Compiling num_cpus v1.17.0
+   Compiling rayon v1.11.0
+   Compiling gaussian-blur v0.1.0 (/Users/Chus/Tmp/gaussian-blur)
+error[E0432]: unresolved import `clap`
+ --> src/main.rs:1:5
+  |
+1 | use clap::{Parser, ValueEnum};
+  |     ^^^^ use of unresolved module or unlinked crate `clap`
+  |
+  = help: if you wanted to use a crate named `clap`, use `cargo add clap` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `image`
+ --> src/main.rs:3:5
+  |
+3 | use image::{ImageReader, ImageFormat};
+  |     ^^^^^ use of unresolved module or unlinked crate `image`
+  |
+  = help: if you wanted to use a crate named `image`, use `cargo add image` to add it to your `Cargo.toml`
+
+error: cannot find attribute `command` in this scope
+ --> src/main.rs:9:3
+  |
+9 | #[command(author, version, about, long_about = None)]
+  |   ^^^^^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:12:7
+   |
+12 |     #[arg(short, long)]
+   |       ^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:16:7
+   |
+16 |     #[arg(short, long)]
+   |       ^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:20:7
+   |
+20 |     #[arg(short, long, default_value_t = 2.0)]
+   |       ^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:24:7
+   |
+24 |     #[arg(short, long)]
+   |       ^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:28:7
+   |
+28 |     #[arg(long, value_enum, default_value_t = Algorithm::Optimized)]
+   |       ^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:32:7
+   |
+32 |     #[arg(long, default_value_t = 0)]
+   |       ^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:36:7
+   |
+36 |     #[arg(long, default_value_t = true)]
+   |       ^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:40:7
+   |
+40 |     #[arg(long, default_value_t = true)]
+   |       ^^^
+
+error: cannot find attribute `arg` in this scope
+  --> src/main.rs:44:7
+   |
+44 |     #[arg(long)]
+   |       ^^^
+
+error[E0599]: no function or associated item named `parse` found for struct `Args` in the current scope
+  --> src/main.rs:61:22
+   |
+10 | struct Args {
+   | ----------- function or associated item `parse` not found for this struct
+...
+61 |     let args = Args::parse();
+   |                      ^^^^^ function or associated item not found in `Args`
+
+error[E0425]: cannot find function `image_to_pixels` in this scope
+  --> src/main.rs:71:18
+   |
+71 |     let pixels = image_to_pixels(&img);
+   |                  ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0599]: no method named `with_simd` found for struct `gaussian_blur::GaussianBlur` in the current scope
+  --> src/main.rs:90:18
+   |
+89 | /             GaussianBlur::new(args.sigma, args.radius, args.blur_alpha)
+90 | |                 .with_simd(args.simd)
+   | |                 -^^^^^^^^^ method not found in `gaussian_blur::GaussianBlur`
+   | |_________________|
+   |
+
+error[E0425]: cannot find function `gaussian_blur_5x5` in this scope
+   --> src/main.rs:98:13
+    |
+ 98 |             gaussian_blur_5x5(&pixels, args.blur_alpha)
+    |             ^^^^^^^^^^^^^^^^^ help: a function with a similar name exists: `gaussian_blur_3x3`
+    |
+   ::: /Users/Chus/Tmp/gaussian-blur/src/lib.rs:348:1
+    |
+348 | pub fn gaussian_blur_3x3(image: &[Vec<Pixel>], blur_alpha: bool) -> Vec<Vec<Pixel>> {
+    | ----------------------------------------------------------------------------------- similarly named function `gaussian_blur_3x3` defined here
+
+error[E0425]: cannot find function `pixels_to_image` in this scope
+   --> src/main.rs:106:23
+    |
+106 |     let blurred_img = pixels_to_image(&blurred_pixels);
+    |                       ^^^^^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0425, E0432, E0599.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `gaussian-blur` (bin "gaussian-blur") due to 17 previous errors
