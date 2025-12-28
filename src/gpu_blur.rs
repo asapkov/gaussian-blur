@@ -16,8 +16,11 @@ use bytemuck;
 
 use crate::Pixel;
 
-// Constants
-const WORKGROUP_SIZE: u32 = 16;     // Match shader workgroup size
+// Constants for optimized work distribution
+const WORKGROUP_SIZE_X: u32 = 16;
+const WORKGROUP_SIZE_Y: u32 = 16;
+const TILE_SIZE_X: u32 = 4;  // Each thread processes 4 pixels in X
+const TILE_SIZE_Y: u32 = 4;  // Each thread processes 4 pixels in Y
 
 // Shader parameters struct - must match the WGSL struct layout
 #[cfg(feature = "gpu")]
@@ -29,7 +32,13 @@ struct ShaderParameters {
     radius: u32,
     blur_alpha: u32,
     sigma: f32,
-    _padding: [f32; 7],  // 7 floats = 28 bytes + 20 = 48 bytes total
+    _padding0: f32,
+    _padding1: f32,
+    _padding2: f32,
+    _padding3: f32,
+    _padding4: f32,
+    _padding5: f32,
+    _padding6: f32,
 }
 
 // Manually implement Pod and Zeroable for ShaderParameters
@@ -202,7 +211,7 @@ impl GpuGaussianBlur {
                         ty: BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(48), // Changed from std::mem::size_of::<ShaderParameters>() to 48
+                            min_binding_size: wgpu::BufferSize::new(48), // 48 bytes as per struct
                         },
                         count: None,
                     },
@@ -255,6 +264,11 @@ impl GpuGaussianBlur {
         
         #[cfg(feature = "gpu")]
         {
+            use std::time::Instant;
+            
+            let total_start = Instant::now();
+            let texture_start = Instant::now();
+            
             if image.is_empty() || image[0].is_empty() {
                 return Ok(Vec::new());
             }
@@ -303,6 +317,9 @@ impl GpuGaussianBlur {
                     rgba_data.push(pixel.a);
                 }
             }
+
+            println!("Texture creation: {:?}", texture_start.elapsed());
+            let texture_write_start = Instant::now();
 
             // Create input texture (regular texture, not storage)
             let input_texture = self.device.create_texture(&TextureDescriptor {
@@ -397,6 +414,9 @@ impl GpuGaussianBlur {
 
             let output_view = output_texture.create_view(&TextureViewDescriptor::default());
 
+            println!("Texture write: {:?}", texture_write_start.elapsed());
+            let kernel_start = Instant::now();
+
             // Generate Gaussian kernel
             let kernel = generate_gaussian_kernel(self.radius, self.sigma);
             println!("Kernel size: {} elements, {} bytes", kernel.len(), kernel.len() * 4);
@@ -414,6 +434,9 @@ impl GpuGaussianBlur {
                 usage: BufferUsages::STORAGE,
             });
 
+            println!("Kernel generation: {:?}", kernel_start.elapsed());
+            let params_start = Instant::now();
+
             // Create parameters struct
             let params = ShaderParameters {
                 width: width as u32,
@@ -421,7 +444,13 @@ impl GpuGaussianBlur {
                 radius: self.radius as u32,
                 blur_alpha: self.blur_alpha as u32,
                 sigma: self.sigma,
-                _padding: [0.0; 7],
+                _padding0: 0.0,
+                _padding1: 0.0,
+                _padding2: 0.0,
+                _padding3: 0.0,
+                _padding4: 0.0,
+                _padding5: 0.0,
+                _padding6: 0.0,
             };
 
             println!("Shader parameters:");
@@ -469,6 +498,9 @@ impl GpuGaussianBlur {
                 ],
             });
 
+            println!("Params/buffer creation: {:?}", params_start.elapsed());
+            let compute_start = Instant::now();
+
             // Create command encoder
             let mut encoder = self
                 .device
@@ -486,21 +518,18 @@ impl GpuGaussianBlur {
                 compute_pass.set_pipeline(&self.horizontal_pipeline);
                 compute_pass.set_bind_group(0, &bind_group, &[]);
                 
-                // Dispatch compute shader - check workgroup limits
-                let workgroup_size = WORKGROUP_SIZE;
-                let dispatch_width = (width as u32 + workgroup_size - 1) / workgroup_size;
-                let dispatch_height = (height as u32 + workgroup_size - 1) / workgroup_size;
+                // Optimized dispatch for tiled processing
+                let effective_width = (width as u32 + TILE_SIZE_X - 1) / TILE_SIZE_X;
+                let effective_height = (height as u32 + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
                 
-                println!("Dispatching horizontal pass: {}x{} workgroups", dispatch_width, dispatch_height);
+                let dispatch_width = (effective_width + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
+                let dispatch_height = (effective_height + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
                 
-                if dispatch_width > device_limits.max_compute_workgroups_per_dimension ||
-                   dispatch_height > device_limits.max_compute_workgroups_per_dimension {
-                    return Err(format!(
-                        "Dispatch dimensions {}x{} exceed workgroup limit {}",
-                        dispatch_width, dispatch_height,
-                        device_limits.max_compute_workgroups_per_dimension
-                    ));
-                }
+                println!("Optimized dispatch: {}x{} workgroups (processing {}x{} effective pixels)",
+                    dispatch_width, dispatch_height, effective_width, effective_height);
+                println!("Total threads: {} (was {})", 
+                    dispatch_width * dispatch_height * WORKGROUP_SIZE_X * WORKGROUP_SIZE_Y,
+                    ((width as u32 + 15) / 16) * ((height as u32 + 15) / 16) * 256);
                 
                 compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
             }
@@ -536,15 +565,18 @@ impl GpuGaussianBlur {
                 compute_pass.set_pipeline(&self.vertical_pipeline);
                 compute_pass.set_bind_group(0, &bind_group, &[]);
                 
-                // Dispatch compute shader
-                let workgroup_size = WORKGROUP_SIZE;
-                let dispatch_width = (width as u32 + workgroup_size - 1) / workgroup_size;
-                let dispatch_height = (height as u32 + workgroup_size - 1) / workgroup_size;
+                // Same optimized dispatch
+                let effective_width = (width as u32 + TILE_SIZE_X - 1) / TILE_SIZE_X;
+                let effective_height = (height as u32 + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
                 
-                println!("Dispatching vertical pass: {}x{} workgroups", dispatch_width, dispatch_height);
+                let dispatch_width = (effective_width + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
+                let dispatch_height = (effective_height + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
                 
                 compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
             }
+
+            println!("Compute setup: {:?}", compute_start.elapsed());
+            let copy_start = Instant::now();
 
             // Create staging buffer to read back results
             let output_buffer_size = (width * height * 4) as wgpu::BufferAddress;
@@ -578,9 +610,15 @@ impl GpuGaussianBlur {
                 },
             );
 
+            println!("Buffer creation: {:?}", copy_start.elapsed());
+            let submit_start = Instant::now();
+
             // Submit commands
             println!("Submitting commands to GPU...");
             self.queue.submit(Some(encoder.finish()));
+
+            println!("Queue submission: {:?}", submit_start.elapsed());
+            let readback_start = Instant::now();
 
             // Read back results
             let buffer_slice = output_buffer.slice(..);
@@ -600,6 +638,9 @@ impl GpuGaussianBlur {
             let data = buffer_slice.get_mapped_range();
             let result_bytes: &[u8] = &data;
 
+            println!("Readback: {:?}", readback_start.elapsed());
+            let convert_start = Instant::now();
+
             // Convert back to 2D pixel array
             let mut result = vec![vec![Pixel::new(0, 0, 0, 0); width]; height];
             for y in 0..height {
@@ -618,9 +659,68 @@ impl GpuGaussianBlur {
             drop(data);
             output_buffer.unmap();
 
+            println!("Conversion: {:?}", convert_start.elapsed());
+            println!("Total GPU time: {:?}", total_start.elapsed());
             println!("GPU blur completed successfully!");
             Ok(result)
         }
+    }
+    
+    /// Benchmark GPU performance
+    pub async fn benchmark(&self) -> Result<f64, String> {
+        #[cfg(feature = "gpu")]
+        {
+            use std::time::Instant;
+            
+            println!("Running GPU benchmark...");
+            
+            // Test different sizes
+            let sizes = [(1024, 1024), (2048, 2048), (4096, 4096)];
+            
+            for &(width, height) in &sizes {
+                println!("\nBenchmarking {}x{} image:", width, height);
+                
+                let data = vec![128u8; width * height * 4];
+                
+                // Time texture upload
+                let upload_start = Instant::now();
+                let texture = self.device.create_texture(&TextureDescriptor {
+                    size: wgpu::Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: TextureFormat::Rgba8Unorm,
+                    usage: TextureUsages::COPY_DST,
+                    label: Some("Benchmark Texture"),
+                    view_formats: &[],
+                });
+                
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &data,
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * width as u32),
+                        rows_per_image: Some(height as u32),
+                    },
+                    wgpu::Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 },
+                );
+                
+                let upload_time = upload_start.elapsed();
+                let upload_bandwidth = (width * height * 4) as f64 / upload_time.as_secs_f64() / 1e9;
+                println!("  Upload: {:.3} ms ({:.2} GB/s)", upload_time.as_secs_f64() * 1000.0, upload_bandwidth);
+            }
+            
+            Ok(0.0)
+        }
+        
+        #[cfg(not(feature = "gpu"))]
+        Err("GPU feature not enabled".to_string())
     }
 }
 
