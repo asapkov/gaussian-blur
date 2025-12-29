@@ -6,6 +6,10 @@ use std::f32::consts::PI;
 use rayon::prelude::*;
 use std::simd::f32x4;
 
+// At the top with other imports
+#[cfg(feature = "gpu")]
+use pollster;
+
 /// RGBA Pixel structure
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pixel {
@@ -623,49 +627,92 @@ impl UnifiedGaussianBlur {
         self.use_simd = enable;
         self
     }
-    
-    /// Apply blur using selected backend
-    pub fn blur(&self, image: &[Vec<Pixel>]) -> Vec<Vec<Pixel>> {
+
+    /// Apply blur and return raw RGBA bytes (width, height, bytes)
+    /// This is more efficient for GPU processing and direct saving
+    pub fn blur_to_bytes(&self, image: &[Vec<Pixel>]) -> Result<(Vec<u8>, usize, usize), String> {
+        if image.is_empty() || image[0].is_empty() {
+            return Ok((Vec::new(), 0, 0));
+        }
+
+        let height = image.len();
+        let width = image[0].len();
+
         match self.backend {
             BlurBackend::Cpu => {
+                // For CPU, blur normally then convert to bytes
                 let cpu_blur = GaussianBlur::new(self.sigma, self.radius, self.blur_alpha)
                     .with_simd(self.use_simd);
-                
-                if let Some(threads) = self.num_threads {
+
+                let pixels = if let Some(threads) = self.num_threads {
                     cpu_blur.with_threads(threads).blur(image)
                 } else {
                     cpu_blur.blur(image)
+                };
+
+                let mut bytes = Vec::with_capacity(width * height * 4);
+
+                for row in &pixels {
+                    for pixel in row {
+                        bytes.push(pixel.r);
+                        bytes.push(pixel.g);
+                        bytes.push(pixel.b);
+                        bytes.push(pixel.a);
+                    }
                 }
+
+                Ok((bytes, width, height))
             }
             #[cfg(feature = "gpu")]
             BlurBackend::Gpu => {
-                // Note: This is blocking for simplicity. In production, you'd want async.
                 let future = async {
-                    let gpu_blur_result = GpuGaussianBlur::new(self.sigma, self.radius, self.blur_alpha).await;
-                    let gpu_blur = match gpu_blur_result {
-                        Ok(blur) => blur,
-                        Err(e) => {
-                            eprintln!("Failed to create GPU blur: {}", e);
-                            // Return early with empty image or handle error
-                            return vec![];
-                        }
-                    };
-                    
-                    match gpu_blur.blur(image) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            eprintln!("GPU blur failed: {}", e);
-                            vec![]
-                        }
+                    match GpuGaussianBlur::new(self.sigma, self.radius, self.blur_alpha).await {
+                        Ok(gpu_blur) => gpu_blur.blur_to_bytes(image),
+                        Err(e) => Err(format!("Failed to create GPU blur: {}", e)),
                     }
                 };
-                
-                // Use pollster to block on async
+
                 pollster::block_on(future)
             }
             #[cfg(not(feature = "gpu"))]
             BlurBackend::Gpu => {
                 panic!("GPU backend requires 'gpu' feature to be enabled");
+            }
+        }
+    }
+    
+    // Also update the existing blur() method to use blur_to_bytes for GPU
+    /// Apply blur using selected backend
+    pub fn blur(&self, image: &[Vec<Pixel>]) -> Vec<Vec<Pixel>> {
+        match self.blur_to_bytes(image) {
+            Ok((bytes, width, height)) => {
+                if width == 0 || height == 0 {
+                    return Vec::new();
+                }
+
+                // Convert bytes back to pixels for compatibility
+                let mut result = Vec::with_capacity(height);
+                let mut offset = 0;
+
+                for _ in 0..height {
+                    let mut row = Vec::with_capacity(width);
+                    for _ in 0..width {
+                        row.push(Pixel::new(
+                            bytes[offset],
+                            bytes[offset + 1],
+                            bytes[offset + 2],
+                            bytes[offset + 3],
+                        ));
+                        offset += 4;
+                    }
+                    result.push(row);
+                }
+
+                result
+            }
+            Err(e) => {
+                eprintln!("Blur failed: {}", e);
+                Vec::new()
             }
         }
     }

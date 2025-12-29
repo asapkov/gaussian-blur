@@ -96,10 +96,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              args.sigma, args.algorithm, args.backend, args.simd);
 
     let start = Instant::now();
-    let blurred_pixels = match args.algorithm {
+    
+    match args.algorithm {
         Algorithm::Simple => {
-            simple_gaussian_blur(&pixels, args.sigma, args.radius, args.blur_alpha)
+            let blurred_pixels = simple_gaussian_blur(&pixels, args.sigma, args.radius, args.blur_alpha);
+            let duration = start.elapsed();
+            println!("Simple blur completed in {:?}", duration);
+            
+            // Convert back to image and save
+            let blurred_img = pixels_to_image(&blurred_pixels);
+            println!("Saving image: {:?}", args.output);
+            blurred_img.save(&args.output)?;
         }
+        
         Algorithm::Optimized => {
             let threads = if args.threads == 0 {
                 num_cpus::get()
@@ -107,17 +116,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.threads
             };
 
-            GaussianBlur::new(args.sigma, args.radius, args.blur_alpha)
+            let blurred_pixels = GaussianBlur::new(args.sigma, args.radius, args.blur_alpha)
                 .with_simd(args.simd)
                 .with_threads(threads)
-                .blur(&pixels)
+                .blur(&pixels);
+            
+            let duration = start.elapsed();
+            println!("Optimized blur completed in {:?}", duration);
+            
+            let blurred_img = pixels_to_image(&blurred_pixels);
+            println!("Saving image: {:?}", args.output);
+            blurred_img.save(&args.output)?;
         }
+        
         Algorithm::Fast3x3 => {
-            gaussian_blur_3x3(&pixels, args.blur_alpha)
+            let blurred_pixels = gaussian_blur_3x3(&pixels, args.blur_alpha);
+            let duration = start.elapsed();
+            println!("Fast 3x3 blur completed in {:?}", duration);
+            
+            let blurred_img = pixels_to_image(&blurred_pixels);
+            println!("Saving image: {:?}", args.output);
+            blurred_img.save(&args.output)?;
         }
+        
         Algorithm::Fast5x5 => {
-            gaussian_blur_5x5(&pixels, args.blur_alpha)
+            let blurred_pixels = gaussian_blur_5x5(&pixels, args.blur_alpha);
+            let duration = start.elapsed();
+            println!("Fast 5x5 blur completed in {:?}", duration);
+            
+            let blurred_img = pixels_to_image(&blurred_pixels);
+            println!("Saving image: {:?}", args.output);
+            blurred_img.save(&args.output)?;
         }
+        
         Algorithm::Unified => {
             let threads = if args.threads == 0 {
                 num_cpus::get()
@@ -128,8 +159,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let blur = UnifiedGaussianBlur::new(args.sigma, args.radius, args.blur_alpha)
                 .with_simd(args.simd)
                 .with_threads(threads);
-                
-            match args.backend {
+            
+            let blur = match args.backend {
                 Backend::Cpu => blur.with_cpu(),
                 Backend::Gpu => {
                     #[cfg(feature = "gpu")]
@@ -142,19 +173,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         blur.with_cpu()
                     }
                 }
-            }.blur(&pixels)
+            };
+            
+            // Use the efficient byte-based method
+            let (blurred_bytes, width, height) = blur.blur_to_bytes(&pixels)
+                .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+            
+            let duration = start.elapsed();
+            println!("Unified blur ({:?}) completed in {:?}", args.backend, duration);
+            
+            // Save directly from bytes - NO CONVERSION!
+            println!("Saving directly from {:?} buffer...", args.backend);
+            image::save_buffer(
+                &args.output,
+                &blurred_bytes,
+                width as u32,
+                height as u32,
+                image::ColorType::Rgba8,
+            )?;
         }
-    };
-    let duration = start.elapsed();
-
-    println!("Blur completed in {:?}", duration);
-
-    // Convert back to image
-    let blurred_img = pixels_to_image(&blurred_pixels);
-
-    // Save image
-    println!("Saving image: {:?}", args.output);
-    blurred_img.save(&args.output)?;
+    }
 
     println!("Done!");
     Ok(())
