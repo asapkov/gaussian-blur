@@ -2,53 +2,43 @@
 name = "gaussian-blur"
 version = "0.1.0"
 edition = "2021"
-
-[dependencies]
-rayon = "1.10"
-num_cpus = "1.16"
-image = { version = "0.25", optional = true }
-clap = { version = "4.5", features = ["derive"], optional = true }
-criterion = { version = "0.5", optional = true }
-wgpu = { version = "0.20", optional = true }
-pollster = { version = "0.3", optional = true }
-bytemuck = { version = "1.24", optional = true }
+license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-image-io = ["dep:image", "dep:clap"]
-bench = ["dep:criterion"]
-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+image-io = ["dep:image"]
+gpu = ["dep:pollster", "dep:wgpu", "dep:bytemuck"]
+metal = ["dep:objc2-metal", "dep:objc2-metal-performance-shaders", "dep:objc2", "dep:objc2-foundation"]
+
+[dependencies]
+rayon = "1.10"
+half = "2.3"
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "bmp"] }
+pollster = { version = "0.3", optional = true }
+wgpu = { version = "0.20", optional = true }
+bytemuck = { version = "1.16", optional = true }
+clap = { version = "4.5", features = ["derive"] }
+
+# Metal dependencies (macOS only)
+objc2 = { version = "0.6.2", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true }
+objc2-metal = { version = "0.3.2", optional = true }
+objc2-metal-performance-shaders = { version = "0.3.2", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = false
 
 [dev-dependencies]
-tempfile = "3.10"
-
-[[example]]
-name = "simple"
-path = "examples/simple.rs"
-
-[[example]]
-name = "benchmark"
-path = "examples/benchmark.rs"
-required-features = ["bench"]
-
-[[example]]
-name = "gpu_benchmark"
-path = "examples/gpu_benchmark.rs"
-required-features = ["image-io", "gpu"]
+criterion = "0.5"
 
 [[bin]]
 name = "gaussian-blur"
 path = "src/main.rs"
-required-features = ["image-io"]
-
-# Increase limits for large images
-[profile.release]
-lto = true
-opt-level = 3
-codegen-units = 1
-
-[profile.dev]
-opt-level = 0
-
-[profile.test]
-opt-level = 1

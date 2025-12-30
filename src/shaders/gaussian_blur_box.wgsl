@@ -8,7 +8,7 @@ struct Parameters {
     blur_alpha: u32,
     _padding0: u32,
     sigma: f32,
-    pass: u32,  // Which pass we're on (0, 1, or 2 for box blur approximation)
+    current_pass: u32,  // Which pass we're on (0, 1, or 2 for box blur approximation)
     _padding1: f32,
     _padding2: f32,
     _padding3: f32,
@@ -58,7 +58,7 @@ fn apply_box_blur(x: u32, y: u32, radius: u32, tex: texture_2d<f32>) -> vec4<f32
     let iy = i32(y);
     
     // For even passes, do horizontal blur; for odd passes, do vertical blur
-    if (params.pass % 2u == 0u) {
+    if (params.current_pass % 2u == 0u) {
         // Horizontal blur
         for (var k = -iradius; k <= iradius; k++) {
             let sample_x = clamp(ix + k, 0, i32(params.width) - 1);
@@ -90,7 +90,7 @@ fn box_blur_pass(
     let tile_start_y = global_id.y * TILE_SIZE_Y;
     
     if (global_id.x == 0u && global_id.y == 0u) {
-        debug_buffer[0] = 1000.0 + f32(params.pass); // Marker with pass number
+        debug_buffer[0] = 1000.0 + f32(params.current_pass); // Marker with pass number
     }
     
     for (var dy = 0u; dy < TILE_SIZE_Y; dy++) {
@@ -101,8 +101,8 @@ fn box_blur_pass(
             let x = tile_start_x + dx;
             if (x >= params.width) { break; }
             
-            // Apply box blur
-            let blurred = apply_box_blur(x, y, params.radius, input_texture);
+            // Apply box blur - use VAR instead of LET since we modify it below
+            var blurred = apply_box_blur(x, y, params.radius, input_texture);
             
             // Preserve alpha if blur_alpha is false
             if (params.blur_alpha == 0u) {
@@ -112,7 +112,7 @@ fn box_blur_pass(
             
             // Store debug info for first pixel
             if (x < 4u && y == 0u) {
-                let base_offset = params.pass * 16u + x * 4u;
+                let base_offset = params.current_pass * 16u + x * 4u;
                 debug_buffer[base_offset + 0u] = blurred.r;
                 debug_buffer[base_offset + 1u] = blurred.g;
                 debug_buffer[base_offset + 2u] = blurred.b;

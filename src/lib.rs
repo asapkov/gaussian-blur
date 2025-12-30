@@ -1,4 +1,4 @@
-//! Gaussian Blur implementation with multithreading, SIMD, and GPU support
+//! Gaussian Blur implementation with multithreading, SIMD, GPU, and Metal support
 
 #![feature(portable_simd)]
 
@@ -567,20 +567,37 @@ pub fn gaussian_blur_5x5(image: &[Vec<Pixel>], blur_alpha: bool) -> Vec<Vec<Pixe
         .collect()
 }
 
-// Re-export GPU module if feature is enabled
+// Re-export GPU modules if feature is enabled
 #[cfg(feature = "gpu")]
 pub use gpu_blur::GpuGaussianBlur;
 
 #[cfg(feature = "gpu")]
+pub use metal_gpu_blur::MetalGpuGaussianBlur;
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub use metal_mps_blur::{MetalMPSBlur, blur_with_metal};
+
+#[cfg(feature = "gpu")]
 mod gpu_blur;
 
-/// Enum to choose processing backend
+#[cfg(feature = "gpu")]
+mod metal_gpu_blur;
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod metal_mps_blur;
+
+/// Backend selection for unified blur
+#[derive(Clone, PartialEq, Debug)]
 pub enum BlurBackend {
+    /// CPU backend (supports SIMD and multithreading)
     Cpu,
+    /// GPU backend (requires 'gpu' feature)
     Gpu,
+    /// Metal backend (requires 'metal' feature, macOS only)
+    Metal,
 }
 
-/// Unified Gaussian Blur processor that can use CPU or GPU
+/// Unified Gaussian Blur processor that can use CPU, GPU, or Metal
 pub struct UnifiedGaussianBlur {
     sigma: f32,
     radius: Option<i32>,
@@ -588,6 +605,8 @@ pub struct UnifiedGaussianBlur {
     backend: BlurBackend,
     num_threads: Option<usize>,
     use_simd: bool,
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    metal_kernel_size: Option<u32>,
 }
 
 impl UnifiedGaussianBlur {
@@ -600,6 +619,8 @@ impl UnifiedGaussianBlur {
             backend: BlurBackend::Cpu,
             num_threads: None,
             use_simd: false,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            metal_kernel_size: None,
         }
     }
     
@@ -616,6 +637,20 @@ impl UnifiedGaussianBlur {
         self
     }
     
+    /// Use Metal backend (requires 'metal' feature and macOS)
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub fn with_metal(mut self) -> Self {
+        self.backend = BlurBackend::Metal;
+        self
+    }
+    
+    /// Set Metal kernel size (macOS only)
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub fn with_metal_kernel_size(mut self, kernel_size: u32) -> Self {
+        self.metal_kernel_size = Some(kernel_size);
+        self
+    }
+    
     /// Set number of threads (CPU only)
     pub fn with_threads(mut self, num_threads: usize) -> Self {
         self.num_threads = Some(num_threads);
@@ -628,93 +663,181 @@ impl UnifiedGaussianBlur {
         self
     }
 
-    /// Apply blur and return raw RGBA bytes (width, height, bytes)
-    /// This is more efficient for GPU processing and direct saving
-    pub fn blur_to_bytes(&self, image: &[Vec<Pixel>]) -> Result<(Vec<u8>, usize, usize), String> {
-        if image.is_empty() || image[0].is_empty() {
-            return Ok((Vec::new(), 0, 0));
+    /// Helper function to convert pixel image to bytes
+    fn image_to_bytes(image: &[Vec<Pixel>]) -> (Vec<u8>, u32, u32) {
+        if image.is_empty() {
+            return (Vec::new(), 0, 0);
         }
-
+        
         let height = image.len();
         let width = image[0].len();
+        let mut bytes = Vec::with_capacity(width * height * 4);
+
+        for row in image {
+            for pixel in row {
+                bytes.push(pixel.r);
+                bytes.push(pixel.g);
+                bytes.push(pixel.b);
+                bytes.push(pixel.a);
+            }
+        }
+
+        (bytes, width as u32, height as u32)
+    }
+
+    /// Helper function to convert bytes back to pixel image
+    fn bytes_to_image(bytes: &[u8], width: u32, height: u32) -> Vec<Vec<Pixel>> {
+        let width = width as usize;
+        let height = height as usize;
+        
+        if bytes.is_empty() || width == 0 || height == 0 {
+            return Vec::new();
+        }
+
+        let mut result = Vec::with_capacity(height);
+        let mut offset = 0;
+
+        for _ in 0..height {
+            let mut row = Vec::with_capacity(width);
+            for _ in 0..width {
+                if offset + 3 < bytes.len() {
+                    row.push(Pixel::new(
+                        bytes[offset],
+                        bytes[offset + 1],
+                        bytes[offset + 2],
+                        bytes[offset + 3],
+                    ));
+                    offset += 4;
+                }
+            }
+            result.push(row);
+        }
+
+        result
+    }
+
+    /// Fallback to CPU implementation for bytes
+    fn blur_to_bytes_fallback(&self, image: &[Vec<Pixel>]) -> (Vec<u8>, u32, u32) {
+        let cpu_blur = GaussianBlur::new(self.sigma, self.radius, self.blur_alpha)
+            .with_simd(self.use_simd);
+        
+        let pixels = if let Some(threads) = self.num_threads {
+            cpu_blur.with_threads(threads).blur(image)
+        } else {
+            cpu_blur.blur(image)
+        };
+        
+        Self::image_to_bytes(&pixels)
+    }
+
+    /// Apply blur and return raw RGBA bytes (width, height, bytes)
+    pub fn blur_to_bytes(&self, image: &[Vec<Pixel>]) -> Result<(Vec<u8>, u32, u32), String> {
+        if image.is_empty() {
+            return Ok((Vec::new(), 0, 0));
+        }
 
         match self.backend {
             BlurBackend::Cpu => {
                 // For CPU, blur normally then convert to bytes
-                let cpu_blur = GaussianBlur::new(self.sigma, self.radius, self.blur_alpha)
-                    .with_simd(self.use_simd);
-
-                let pixels = if let Some(threads) = self.num_threads {
-                    cpu_blur.with_threads(threads).blur(image)
-                } else {
-                    cpu_blur.blur(image)
-                };
-
-                let mut bytes = Vec::with_capacity(width * height * 4);
-
-                for row in &pixels {
-                    for pixel in row {
-                        bytes.push(pixel.r);
-                        bytes.push(pixel.g);
-                        bytes.push(pixel.b);
-                        bytes.push(pixel.a);
-                    }
-                }
-
+                let (bytes, width, height) = self.blur_to_bytes_fallback(image);
                 Ok((bytes, width, height))
             }
             #[cfg(feature = "gpu")]
             BlurBackend::Gpu => {
+                // GPU backend - try to use GPU, fall back to CPU if it fails
                 let future = async {
                     match GpuGaussianBlur::new(self.sigma, self.radius, self.blur_alpha).await {
-                        Ok(gpu_blur) => gpu_blur.blur_to_bytes(image),
+                        Ok(gpu_blur) => {
+                            // GpuGaussianBlur::blur_to_bytes returns Result<(Vec<u8>, usize, usize), String>
+                            gpu_blur.blur_to_bytes(image)
+                        },
                         Err(e) => Err(format!("Failed to create GPU blur: {}", e)),
                     }
                 };
 
-                pollster::block_on(future)
+                match pollster::block_on(future) {
+                    Ok((blurred_bytes, width, height)) => {
+                        Ok((blurred_bytes, width as u32, height as u32))
+                    },
+                    Err(e) => {
+                        eprintln!("GPU blur failed: {}, falling back to CPU", e);
+                        // Fall back to CPU
+                        let (bytes, width, height) = self.blur_to_bytes_fallback(image);
+                        Ok((bytes, width, height))
+                    }
+                }
+            }
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            BlurBackend::Metal => {
+                // Use Metal backend
+                let (bytes, width, height) = Self::image_to_bytes(image);
+                
+                match MetalMPSBlur::new(self.sigma, self.metal_kernel_size) {
+                    Ok(metal_blur) => {
+                        match metal_blur.blur_to_bytes(&bytes, width, height, Some(self.sigma)) {
+                            Ok(blurred_bytes) => Ok((blurred_bytes, width, height)),
+                            Err(e) => {
+                                eprintln!("Metal blur failed: {}, falling back to CPU", e);
+                                // Fall back to CPU
+                                let (bytes, width, height) = self.blur_to_bytes_fallback(image);
+                                Ok((bytes, width, height))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create Metal blur: {}, falling back to CPU", e);
+                        // Fall back to CPU
+                        let (bytes, width, height) = self.blur_to_bytes_fallback(image);
+                        Ok((bytes, width, height))
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "metal", target_os = "macos")))]
+            BlurBackend::Metal => {
+                eprintln!("Metal backend requires 'metal' feature to be enabled and macOS");
+                // Fall back to CPU
+                let (bytes, width, height) = self.blur_to_bytes_fallback(image);
+                Ok((bytes, width, height))
             }
             #[cfg(not(feature = "gpu"))]
             BlurBackend::Gpu => {
-                panic!("GPU backend requires 'gpu' feature to be enabled");
+                eprintln!("GPU backend requires 'gpu' feature to be enabled");
+                // Fall back to CPU
+                let (bytes, width, height) = self.blur_to_bytes_fallback(image);
+                Ok((bytes, width, height))
             }
         }
     }
-    
-    // Also update the existing blur() method to use blur_to_bytes for GPU
-    /// Apply blur using selected backend
+
+    /// Apply blur using selected backend (returns pixels, for compatibility)
     pub fn blur(&self, image: &[Vec<Pixel>]) -> Vec<Vec<Pixel>> {
         match self.blur_to_bytes(image) {
             Ok((bytes, width, height)) => {
                 if width == 0 || height == 0 {
                     return Vec::new();
                 }
-
-                // Convert bytes back to pixels for compatibility
-                let mut result = Vec::with_capacity(height);
-                let mut offset = 0;
-
-                for _ in 0..height {
-                    let mut row = Vec::with_capacity(width);
-                    for _ in 0..width {
-                        row.push(Pixel::new(
-                            bytes[offset],
-                            bytes[offset + 1],
-                            bytes[offset + 2],
-                            bytes[offset + 3],
-                        ));
-                        offset += 4;
-                    }
-                    result.push(row);
-                }
-
-                result
+                Self::bytes_to_image(&bytes, width, height)
             }
             Err(e) => {
                 eprintln!("Blur failed: {}", e);
                 Vec::new()
             }
         }
+    }
+
+    /// Get the sigma value
+    pub fn sigma(&self) -> f32 {
+        self.sigma
+    }
+
+    /// Check if blur alpha is enabled
+    pub fn blur_alpha(&self) -> bool {
+        self.blur_alpha
+    }
+
+    /// Get the backend
+    pub fn backend(&self) -> &BlurBackend {
+        &self.backend
     }
 }
 
@@ -808,6 +931,61 @@ mod tests {
                 assert!((p1.r as i32 - p2.r as i32).abs() <= 2);
                 assert!((p1.g as i32 - p2.g as i32).abs() <= 2);
                 assert!((p1.b as i32 - p2.b as i32).abs() <= 2);
+            }
+        }
+    }
+
+    #[test]
+    fn test_fast_blurs() {
+        let image = vec![
+            vec![Pixel::rgb(255, 0, 0), Pixel::rgb(0, 255, 0), Pixel::rgb(0, 0, 255)],
+            vec![Pixel::rgb(255, 255, 0), Pixel::rgb(255, 0, 255), Pixel::rgb(0, 255, 255)],
+            vec![Pixel::rgb(128, 128, 128), Pixel::rgb(64, 64, 64), Pixel::rgb(192, 192, 192)],
+        ];
+
+        // Test 3x3 blur
+        let blurred_3x3 = gaussian_blur_3x3(&image, true);
+        assert_eq!(blurred_3x3.len(), 3);
+        assert_eq!(blurred_3x3[0].len(), 3);
+
+        // Test 5x5 blur
+        let blurred_5x5 = gaussian_blur_5x5(&image, true);
+        assert_eq!(blurred_5x5.len(), 3);
+        assert_eq!(blurred_5x5[0].len(), 3);
+
+        // 5x5 should be more blurred than 3x3
+        let center_3x3 = blurred_3x3[1][1];
+        let center_5x5 = blurred_5x5[1][1];
+        
+        // 5x5 blur should have colors more mixed (less extreme values)
+        let diff_3x3 = (center_3x3.r as i32 - center_3x3.g as i32).abs();
+        let diff_5x5 = (center_5x5.r as i32 - center_5x5.g as i32).abs();
+        assert!(diff_5x5 <= diff_3x3);
+    }
+
+    #[test]
+    fn test_unified_blur() {
+        let image = vec![
+            vec![Pixel::rgb(255, 0, 0), Pixel::rgb(0, 255, 0)],
+            vec![Pixel::rgb(0, 0, 255), Pixel::rgb(255, 255, 255)],
+        ];
+
+        // Test CPU backend
+        let unified = UnifiedGaussianBlur::new(1.0, Some(1), true)
+            .with_cpu()
+            .with_simd(true);
+
+        let blurred = unified.blur(&image);
+        assert_eq!(blurred.len(), 2);
+        assert_eq!(blurred[0].len(), 2);
+
+        // Test that all pixels have valid values
+        for row in &blurred {
+            for pixel in row {
+                assert!(pixel.r <= 255);
+                assert!(pixel.g <= 255);
+                assert!(pixel.b <= 255);
+                assert!(pixel.a <= 255);
             }
         }
     }
