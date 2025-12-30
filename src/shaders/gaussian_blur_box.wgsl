@@ -89,8 +89,13 @@ fn box_blur_pass(
     let tile_start_x = global_id.x * TILE_SIZE_X;
     let tile_start_y = global_id.y * TILE_SIZE_Y;
 
+    // Enhanced debug info
     if (global_id.x == 0u && global_id.y == 0u) {
         debug_buffer[0] = 1000.0 + f32(params.current_pass); // Marker with pass number
+        debug_buffer[1] = f32(params.width);  // Store width
+        debug_buffer[2] = f32(params.height); // Store height
+        debug_buffer[3] = f32(params.radius); // Store radius
+        debug_buffer[4] = f32(params.blur_alpha); // Store blur_alpha flag
     }
 
     for (var dy = 0u; dy < TILE_SIZE_Y; dy++) {
@@ -112,11 +117,11 @@ fn box_blur_pass(
 
             // Store debug info for first pixel (multiply by 255 for debug)
             if (x < 4u && y == 0u) {
-                let base_offset = params.current_pass * 16u + x * 4u;
-                debug_buffer[base_offset + 0u] = blurred.r * 255.0;
-                debug_buffer[base_offset + 1u] = blurred.g * 255.0;
-                debug_buffer[base_offset + 2u] = blurred.b * 255.0;
-                debug_buffer[base_offset + 3u] = blurred.a * 255.0;
+                let base_offset = params.current_pass * 20u + x * 4u;
+                debug_buffer[base_offset + 5u] = blurred.r * 255.0;
+                debug_buffer[base_offset + 6u] = blurred.g * 255.0;
+                debug_buffer[base_offset + 7u] = blurred.b * 255.0;
+                debug_buffer[base_offset + 8u] = blurred.a * 255.0;
             }
 
             // Store result directly as Rgba8Unorm (textureStore handles conversion)

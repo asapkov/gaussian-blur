@@ -90,14 +90,45 @@ impl GpuGaussianBlur {
         {
             // Initialize wgpu
             let instance = Instance::default();
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    force_fallback_adapter: false,
-                    compatible_surface: None,
-                })
-                .await
-                .ok_or("Failed to find a suitable GPU adapter")?;
+
+            // Try to find integrated GPU first
+            println!("Looking for integrated GPU...");
+            let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+            println!("Found {} adapters", adapters.len());
+
+            let adapter = {
+                // First try to find integrated GPU
+                let mut found_adapter = None;
+                
+                for adapter in adapters.iter() {
+                    let info = adapter.get_info();
+                    println!("Found adapter: {} ({:?})", info.name, info.device_type);
+                    
+                    if info.device_type == wgpu::DeviceType::IntegratedGpu {
+                        println!("Using integrated GPU: {}", info.name);
+                        found_adapter = Some(adapter);
+                        break;
+                    }
+                }
+                
+                // If no integrated GPU found, use the first available adapter
+                if let Some(adapter) = found_adapter {
+                    adapter.clone()
+                } else {
+                    println!("No integrated GPU found, requesting default adapter");
+                    instance
+                        .request_adapter(&wgpu::RequestAdapterOptions {
+                            power_preference: wgpu::PowerPreference::LowPower,
+                            force_fallback_adapter: false,
+                            compatible_surface: None,
+                        })
+                        .await
+                        .ok_or("Failed to find a suitable GPU adapter")?
+                }
+            };
+
+            let info = adapter.get_info();
+            println!("Selected adapter: {} ({:?})", info.name, info.device_type);
 
             // Get adapter limits
             let adapter_limits = adapter.limits();
@@ -130,7 +161,7 @@ impl GpuGaussianBlur {
 
             println!("Requesting device with adapter's maximum limits...");
 
-            let (device, queue) = adapter
+            let (device, queue): (Device, Queue) = adapter
                 .request_device(
                     &DeviceDescriptor {
                         label: Some("Gaussian Blur Device"),
@@ -509,35 +540,38 @@ impl GpuGaussianBlur {
             let debug_init_data = vec![0u8; debug_buffer_size_bytes as usize];
             self.queue.write_buffer(&debug_buffer, 0, &debug_init_data);
 
-            // === STEP 1: Minimal test shader ===
-            println!("\n=== Step 1: Minimal Test ===");
-            let minimal_shader_source = r#"
-@group(0) @binding(3) var<storage, read_write> debug_buffer: array<f32, 1024>;
+            // === STEP 1: Test direct write to output texture ===
+            println!("\n=== Step 1: Testing Direct Texture Write ===");
+            
+            let test_shader_source = r#"
+@group(0) @binding(1) var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 @compute @workgroup_size(1, 1, 1)
-fn minimal_test() {
-    debug_buffer[0] = 123.0;
-    debug_buffer[1] = 456.0;
-    debug_buffer[2] = 789.0;
+fn test_write() {
+    // Write test colors to first few pixels
+    textureStore(output_texture, vec2<u32>(0u, 0u), vec4<f32>(1.0, 0.0, 0.0, 1.0)); // Red
+    textureStore(output_texture, vec2<u32>(1u, 0u), vec4<f32>(0.0, 1.0, 0.0, 1.0)); // Green
+    textureStore(output_texture, vec2<u32>(2u, 0u), vec4<f32>(0.0, 0.0, 1.0, 1.0)); // Blue
+    textureStore(output_texture, vec2<u32>(3u, 0u), vec4<f32>(1.0, 1.0, 1.0, 1.0)); // White
 }
 "#;
 
-            let minimal_shader = self.device.create_shader_module(ShaderModuleDescriptor {
-                label: Some("Minimal Test Shader"),
-                source: ShaderSource::Wgsl(minimal_shader_source.into()),
+            let test_shader = self.device.create_shader_module(ShaderModuleDescriptor {
+                label: Some("Test Write Shader"),
+                source: ShaderSource::Wgsl(test_shader_source.into()),
             });
 
-            let minimal_pipeline = self.device.create_compute_pipeline(&ComputePipelineDescriptor {
-                label: Some("Minimal Test Pipeline"),
+            let test_pipeline = self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some("Test Write Pipeline"),
                 layout: Some(&self.pipeline_layout),
-                module: &minimal_shader,
-                entry_point: "minimal_test",
+                module: &test_shader,
+                entry_point: "test_write",
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             });
 
-            // Create a temporary bind group for minimal test
-            let minimal_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
-                label: Some("Minimal Test Bind Group"),
+            // Create a temporary bind group for test
+            let test_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Test Bind Group"),
                 layout: &self.bind_group_layout,
                 entries: &[
                     BindGroupEntry {
@@ -546,7 +580,7 @@ fn minimal_test() {
                     },
                     BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&intermediate_view1),
+                        resource: wgpu::BindingResource::TextureView(&output_view),
                     },
                     BindGroupEntry {
                         binding: 2,
@@ -568,83 +602,143 @@ fn minimal_test() {
                 ],
             });
 
-            // Run minimal test
-            let mut minimal_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Minimal Test Encoder"),
+            // Run test
+            let mut test_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Test Encoder"),
             });
 
             {
-                let mut compute_pass = minimal_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Minimal Test Compute Pass"),
+                let mut compute_pass = test_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Test Compute Pass"),
                     timestamp_writes: None,
                 });
-                compute_pass.set_pipeline(&minimal_pipeline);
-                compute_pass.set_bind_group(0, &minimal_bind_group, &[]);
+                compute_pass.set_pipeline(&test_pipeline);
+                compute_pass.set_bind_group(0, &test_bind_group, &[]);
                 compute_pass.dispatch_workgroups(1, 1, 1);
             }
 
-            let minimal_staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Minimal Test Staging Buffer"),
-                size: debug_buffer_size_bytes,
+            // For Rgba8Unorm, each pixel is 4 bytes
+            let bytes_per_pixel = 4u32;
+            let bytes_per_row_unaligned = bytes_per_pixel * width as u32;
+            let bytes_per_row_aligned = ((bytes_per_row_unaligned + alignment - 1) / alignment) * alignment;
+
+            // Calculate output buffer size with aligned rows for Rgba8Unorm
+            let output_buffer_size = (bytes_per_row_aligned as u64 * height as u64) as wgpu::BufferAddress;
+            
+            let test_output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Test Output Buffer"),
+                size: output_buffer_size,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
 
-            minimal_encoder.copy_buffer_to_buffer(&debug_buffer, 0, &minimal_staging_buffer, 0, debug_buffer_size_bytes);
-            self.queue.submit(Some(minimal_encoder.finish()));
+            // Copy texture to buffer
+            test_encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &output_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &test_output_buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row_aligned),
+                        rows_per_image: Some(height as u32),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: width as u32,
+                    height: height as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
 
-            // Read minimal test results
-            self.device.poll(wgpu::Maintain::Wait);
-            let minimal_slice = minimal_staging_buffer.slice(..);
-            let (minimal_sender, minimal_receiver) = std::sync::mpsc::channel();
-            minimal_slice.map_async(wgpu::MapMode::Read, move |result| {
-                minimal_sender.send(result).unwrap();
+            // Submit and wait
+            self.queue.submit(Some(test_encoder.finish()));
+            self.device.poll(wgpu::Maintain::Wait); // CRITICAL: Wait for GPU
+
+            // Read back test results
+            let buffer_slice = test_output_buffer.slice(..);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::Maintain::Wait);
+            self.device.poll(wgpu::Maintain::Wait); // CRITICAL: Wait for mapping
 
-            let minimal_result = match minimal_receiver.recv() {
-                Ok(Ok(_)) => {
-                    let minimal_data = minimal_slice.get_mapped_range();
-                    let minimal_bytes = minimal_data.to_vec();
-                    
-                    let mut minimal_values = Vec::new();
-                    for i in 0..3 {
-                        let offset = i * 4;
-                        if offset + 4 <= minimal_bytes.len() {
-                            let value_bytes: [u8; 4] = minimal_bytes[offset..offset+4].try_into().unwrap();
-                            let value = f32::from_le_bytes(value_bytes);
-                            minimal_values.push(value);
+            let test_result = match receiver.recv() {
+                Ok(Ok(())) => {
+                    let data = buffer_slice.get_mapped_range();
+                    // Check first few pixels
+                    let mut test_pixels = Vec::new();
+                    for i in 0..4 {
+                        if i * 4 + 3 < data.len() {
+                            test_pixels.push((
+                                data[i * 4],
+                                data[i * 4 + 1],
+                                data[i * 4 + 2],
+                                data[i * 4 + 3],
+                            ));
                         }
                     }
                     
-                    println!("Minimal test results: {:?}", minimal_values);
-                    
-                    if minimal_values.get(0) == Some(&123.0) {
-                        println!("✓ Minimal test passed");
-                        true
-                    } else {
-                        println!("✗ Minimal test failed");
-                        false
+                    println!("Test pixels (should be red, green, blue, white):");
+                    for (i, (r, g, b, a)) in test_pixels.iter().enumerate() {
+                        println!("  Pixel {}: R={}, G={}, B={}, A={}", i, r, g, b, a);
                     }
+                    
+                    // Check if we got expected colors (within tolerance)
+                    let expected = vec![
+                        (255, 0, 0, 255),   // Red
+                        (0, 255, 0, 255),   // Green  
+                        (0, 0, 255, 255),   // Blue
+                        (255, 255, 255, 255), // White
+                    ];
+                    
+                    let mut passed = true;
+                    for (i, ((actual_r, actual_g, actual_b, actual_a), (exp_r, exp_g, exp_b, exp_a))) in 
+                        test_pixels.iter().zip(expected.iter()).enumerate() {
+                        
+                        let close = |a: u8, b: u8| (a as i32 - b as i32).abs() < 10;
+                        if !close(*actual_r, *exp_r) || !close(*actual_g, *exp_g) || 
+                           !close(*actual_b, *exp_b) || !close(*actual_a, *exp_a) {
+                            println!("✗ Pixel {} doesn't match expected color", i);
+                            passed = false;
+                        }
+                    }
+                    
+                    if passed {
+                        println!("✓ Texture write test passed");
+                    } else {
+                        println!("✗ Texture write test failed");
+                    }
+                    
+                    passed
                 }
                 Ok(Err(e)) => {
-                    println!("Minimal test mapping failed: {}", e);
+                    println!("Test mapping failed: {}", e);
                     false
                 }
                 Err(e) => {
-                    println!("Minimal test channel error: {}", e);
+                    println!("Test channel error: {}", e);
                     false
                 }
             };
 
-            if !minimal_result {
-                return Err("Minimal GPU test failed".to_string());
+            drop(test_output_buffer);
+
+            if !test_result {
+                return Err("Texture write test failed - GPU pipeline not working".to_string());
             }
 
-            // Reset debug buffer
-            println!("Resetting debug buffer to zeros...");
-            self.queue.write_buffer(&debug_buffer, 0, &debug_init_data);
+            // Clear output texture for actual blur
+            println!("Clearing output texture for blur passes...");
+            let clear_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Clear Encoder"),
+            });
+            self.queue.submit(Some(clear_encoder.finish()));
             self.device.poll(wgpu::Maintain::Wait);
 
             // === STEP 2: Multiple Box Blur Passes ===
@@ -743,9 +837,9 @@ fn minimal_test() {
                     compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
                 }
                 
-                // Submit this pass
+                // Submit this pass and wait
                 self.queue.submit(Some(encoder.finish()));
-                self.device.poll(wgpu::Maintain::Wait);
+                self.device.poll(wgpu::Maintain::Wait); // Wait for GPU to finish
                 
                 println!("Pass {} completed", pass_index + 1);
             }
@@ -765,15 +859,16 @@ fn minimal_test() {
             });
             debug_encoder.copy_buffer_to_buffer(&debug_buffer, 0, &debug_staging_buffer, 0, debug_buffer_size_bytes);
             self.queue.submit(Some(debug_encoder.finish()));
+            
+            self.device.poll(wgpu::Maintain::Wait); // Wait for copy
 
-            self.device.poll(wgpu::Maintain::Wait);
             let debug_slice = debug_staging_buffer.slice(..);
             let (debug_sender, debug_receiver) = std::sync::mpsc::channel();
             debug_slice.map_async(wgpu::MapMode::Read, move |result| {
                 debug_sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::Maintain::Wait);
+            self.device.poll(wgpu::Maintain::Wait); // Wait for mapping
 
             debug_receiver
                 .recv()
@@ -793,12 +888,17 @@ fn minimal_test() {
             }
 
             println!("\n=== Debug Analysis ===");
-            println!("Marker: {}", debug_values[0]);
+            println!("Marker (1000 + pass): {}", debug_values[0]);
+            println!("Width: {}", debug_values[1]);
+            println!("Height: {}", debug_values[2]);
+            println!("Radius: {}", debug_values[3]);
+            println!("Blur Alpha Flag: {}", debug_values[4]);
 
-            if debug_values.len() > 16 {
-                println!("\n=== Pixel Tracking (first 4 pixels, last pass) ===");
+            // Show debug pixels for each pass
+            for pass in 0..BOX_BLUR_PASSES {
+                println!("\n=== Pass {} Debug Pixels ===", pass);
                 for i in 0..4 {
-                    let offset = ((BOX_BLUR_PASSES - 1) as usize) * 16 + i * 4;
+                    let offset = (5 + (pass as usize) * 20 + i * 4) as usize;
                     if offset + 3 < debug_values.len() {
                         println!("  Pixel {}: R={:.1}, G={:.1}, B={:.1}, A={:.1}", 
                             i, debug_values[offset], debug_values[offset+1], 
@@ -813,21 +913,13 @@ fn minimal_test() {
             // === COPY OUTPUT TO BUFFER ===
             println!("\n=== Step 4: Copying Results (direct to RGBA8 buffer) ===");
             
-            // For Rgba8Unorm, each pixel is 4 bytes
-            let bytes_per_pixel = 4u32;
-            let bytes_per_row_unaligned = bytes_per_pixel * width as u32;
-            let bytes_per_row_aligned = ((bytes_per_row_unaligned + alignment - 1) / alignment) * alignment;
-
             println!("Rgba8Unorm bytes per row: {} -> {} (aligned)", 
                 bytes_per_row_unaligned, bytes_per_row_aligned);
-
-            // Calculate output buffer size with aligned rows for Rgba8Unorm
-            let output_buffer_size = (bytes_per_row_aligned as u64 * height as u64) as wgpu::BufferAddress;
             println!("Output buffer size: {} bytes ({} aligned rows × {} height)", 
                 output_buffer_size, bytes_per_row_aligned, height);
 
-            let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Output Buffer"),
+            let final_output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Final Output Buffer"),
                 size: output_buffer_size,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
@@ -847,7 +939,7 @@ fn minimal_test() {
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::ImageCopyBuffer {
-                    buffer: &output_buffer,
+                    buffer: &final_output_buffer,
                     layout: wgpu::ImageDataLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row_aligned),
@@ -863,16 +955,16 @@ fn minimal_test() {
 
             // Submit final copy
             self.queue.submit(Some(final_encoder.finish()));
-            self.device.poll(wgpu::Maintain::Wait);
+            self.device.poll(wgpu::Maintain::Wait); // Wait for GPU
 
             // Read back image results
-            let buffer_slice = output_buffer.slice(..);
+            let buffer_slice = final_output_buffer.slice(..);
             let (sender, receiver) = std::sync::mpsc::channel();
             buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
                 sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::Maintain::Wait);
+            self.device.poll(wgpu::Maintain::Wait); // Wait for mapping
 
             receiver
                 .recv()
@@ -941,7 +1033,7 @@ fn minimal_test() {
 
             // Cleanup
             drop(data);
-            output_buffer.unmap();
+            final_output_buffer.unmap();
 
             println!("Total GPU time: {:?}", total_start.elapsed());
             
@@ -949,6 +1041,19 @@ fn minimal_test() {
             if result_bytes.len() >= 4 {
                 println!("First output pixel: R:{}, G:{}, B:{}, A:{}", 
                     result_bytes[0], result_bytes[1], result_bytes[2], result_bytes[3]);
+                
+                // Check if we have non-zero data
+                let mut has_non_zero = false;
+                for &value in result_bytes.iter().take(100) {
+                    if value != 0 {
+                        has_non_zero = true;
+                        break;
+                    }
+                }
+                
+                if !has_non_zero {
+                    println!("WARNING: First 100 bytes are all zero!");
+                }
             }
             
             Ok((result_bytes, width, height))
