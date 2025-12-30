@@ -1,5 +1,5 @@
 // Gaussian Blur using Box Blur Approximation (3 passes approximates Gaussian)
-// This is MUCH faster for large sigma values
+// Direct to Rgba8Unorm storage texture - simplest and fastest for PNG output
 
 struct Parameters {
     width: u32,
@@ -8,7 +8,7 @@ struct Parameters {
     blur_alpha: u32,
     _padding0: u32,
     sigma: f32,
-    pass: u32,  // Which pass we're on (0, 1, or 2 for box blur approximation)
+    current_pass: u32,  // Which pass we're on (0, 1, or 2 for box blur approximation)
     _padding1: f32,
     _padding2: f32,
     _padding3: f32,
@@ -33,7 +33,7 @@ var<storage, read_write> debug_buffer: array<f32, 1024>;
 var input_texture: texture_2d<f32>;
 
 @group(0) @binding(1)
-var output_texture: texture_storage_2d<rgba16float, write>;
+var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 @group(0) @binding(2)
 var<uniform> params: Parameters;
@@ -45,20 +45,20 @@ const TILE_SIZE_Y = 4u;
 
 fn texture_sample_normalized(tex: texture_2d<f32>, coords: vec2<i32>) -> vec4<f32> {
     let pixel = textureLoad(tex, coords, 0);
-    return pixel * 255.0;
+    return pixel;
 }
 
 // Simple box blur - much faster than Gaussian convolution
 fn apply_box_blur(x: u32, y: u32, radius: u32, tex: texture_2d<f32>) -> vec4<f32> {
     var sum = vec4<f32>(0.0);
     var count = 0.0;
-    
+
     let iradius = i32(radius);
     let ix = i32(x);
     let iy = i32(y);
-    
+
     // For even passes, do horizontal blur; for odd passes, do vertical blur
-    if (params.pass % 2u == 0u) {
+    if (params.current_pass % 2u == 0u) {
         // Horizontal blur
         for (var k = -iradius; k <= iradius; k++) {
             let sample_x = clamp(ix + k, 0, i32(params.width) - 1);
@@ -75,7 +75,7 @@ fn apply_box_blur(x: u32, y: u32, radius: u32, tex: texture_2d<f32>) -> vec4<f32
             count += 1.0;
         }
     }
-    
+
     if (count > 0.0) {
         return sum / count;
     }
@@ -88,39 +88,39 @@ fn box_blur_pass(
 ) {
     let tile_start_x = global_id.x * TILE_SIZE_X;
     let tile_start_y = global_id.y * TILE_SIZE_Y;
-    
+
     if (global_id.x == 0u && global_id.y == 0u) {
-        debug_buffer[0] = 1000.0 + f32(params.pass); // Marker with pass number
+        debug_buffer[0] = 1000.0 + f32(params.current_pass); // Marker with pass number
     }
-    
+
     for (var dy = 0u; dy < TILE_SIZE_Y; dy++) {
         let y = tile_start_y + dy;
         if (y >= params.height) { break; }
-        
+
         for (var dx = 0u; dx < TILE_SIZE_X; dx++) {
             let x = tile_start_x + dx;
             if (x >= params.width) { break; }
-            
-            // Apply box blur
-            let blurred = apply_box_blur(x, y, params.radius, input_texture);
-            
+
+            // Apply box blur - use VAR instead of LET since we modify it below
+            var blurred = apply_box_blur(x, y, params.radius, input_texture);
+
             // Preserve alpha if blur_alpha is false
             if (params.blur_alpha == 0u) {
                 let original = texture_sample_normalized(input_texture, vec2<i32>(i32(x), i32(y)));
                 blurred.a = original.a;
             }
-            
-            // Store debug info for first pixel
+
+            // Store debug info for first pixel (multiply by 255 for debug)
             if (x < 4u && y == 0u) {
-                let base_offset = params.pass * 16u + x * 4u;
-                debug_buffer[base_offset + 0u] = blurred.r;
-                debug_buffer[base_offset + 1u] = blurred.g;
-                debug_buffer[base_offset + 2u] = blurred.b;
-                debug_buffer[base_offset + 3u] = blurred.a;
+                let base_offset = params.current_pass * 16u + x * 4u;
+                debug_buffer[base_offset + 0u] = blurred.r * 255.0;
+                debug_buffer[base_offset + 1u] = blurred.g * 255.0;
+                debug_buffer[base_offset + 2u] = blurred.b * 255.0;
+                debug_buffer[base_offset + 3u] = blurred.a * 255.0;
             }
-            
-            // Store result
-            textureStore(output_texture, vec2<u32>(x, y), blurred / 255.0);
+
+            // Store result directly as Rgba8Unorm (textureStore handles conversion)
+            textureStore(output_texture, vec2<u32>(x, y), blurred);
         }
     }
 }

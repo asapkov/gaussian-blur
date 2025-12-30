@@ -1,6 +1,6 @@
 //! Gaussian Blur CLI tool
 use clap::{Parser, ValueEnum};
-use gaussian_blur::{Pixel, UnifiedGaussianBlur, image_to_pixels};
+use gaussian_blur::{UnifiedGaussianBlur, image_to_pixels};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

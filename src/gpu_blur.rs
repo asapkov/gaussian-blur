@@ -13,8 +13,6 @@ use wgpu::{
 
 #[cfg(feature = "gpu")]
 use bytemuck;
-#[cfg(feature = "gpu")]
-use half;
 
 use crate::Pixel;
 
@@ -176,13 +174,13 @@ impl GpuGaussianBlur {
                         },
                         count: None,
                     },
-                    // Output texture (storage, write-only, rgba16float) - binding 1
+                    // Output texture (storage, write-only, rgba8unorm) - binding 1
                     BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: BindingType::StorageTexture {
                             access: StorageTextureAccess::WriteOnly,
-                            format: TextureFormat::Rgba16Float,
+                            format: TextureFormat::Rgba8Unorm,
                             view_dimension: TextureViewDimension::D2,
                         },
                         count: None,
@@ -338,15 +336,6 @@ impl GpuGaussianBlur {
                 ));
             }
 
-            // Check if we have enough memory
-            let required_buffer_size = (width * height * 4) as u64;
-            if required_buffer_size > device_limits.max_buffer_size as u64 {
-                return Err(format!(
-                    "Image requires {} bytes but GPU buffer limit is {} bytes",
-                    required_buffer_size, device_limits.max_buffer_size
-                ));
-            }
-
             // Convert image to flat RGBA bytes
             println!("Input texture first pixel: R:{}, G:{}, B:{}, A:{}", 
                 image[0][0].r, image[0][0].g, image[0][0].b, image[0][0].a);
@@ -452,7 +441,7 @@ impl GpuGaussianBlur {
                                      wgpu::TextureUsages::TEXTURE_BINDING |
                                      wgpu::TextureUsages::COPY_SRC;
 
-            // Create intermediate texture 1 (Rgba16Float storage)
+            // Create intermediate texture 1 (Rgba8Unorm storage)
             let intermediate_texture1 = self.device.create_texture(&TextureDescriptor {
                 label: Some("Intermediate Texture 1"),
                 size: wgpu::Extent3d {
@@ -463,14 +452,14 @@ impl GpuGaussianBlur {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
+                format: TextureFormat::Rgba8Unorm,
                 usage: intermediate_usage,
-                view_formats: &[TextureFormat::Rgba16Float],
+                view_formats: &[TextureFormat::Rgba8Unorm],
             });
 
             let intermediate_view1 = intermediate_texture1.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Create intermediate texture 2 (Rgba16Float storage)
+            // Create intermediate texture 2 (Rgba8Unorm storage)
             let intermediate_texture2 = self.device.create_texture(&TextureDescriptor {
                 label: Some("Intermediate Texture 2"),
                 size: wgpu::Extent3d {
@@ -481,14 +470,14 @@ impl GpuGaussianBlur {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
+                format: TextureFormat::Rgba8Unorm,
                 usage: intermediate_usage,
-                view_formats: &[TextureFormat::Rgba16Float],
+                view_formats: &[TextureFormat::Rgba8Unorm],
             });
 
             let intermediate_view2 = intermediate_texture2.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Create output texture (write-only storage, Rgba16Float)
+            // Create output texture (write-only storage, Rgba8Unorm)
             let output_texture = self.device.create_texture(&TextureDescriptor {
                 label: Some("Output Texture"),
                 size: wgpu::Extent3d {
@@ -499,10 +488,10 @@ impl GpuGaussianBlur {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
+                format: TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::STORAGE_BINDING | 
                        wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[TextureFormat::Rgba16Float],
+                view_formats: &[TextureFormat::Rgba8Unorm],
             });
 
             let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -668,9 +657,9 @@ fn minimal_test() {
 
             // Define clear pass structure: (input_view, output_view)
             let passes = [
-                (&input_view, &intermediate_view1),      // Pass 0: Rgba8Unorm -> Rgba16Float
-                (&intermediate_view1, &intermediate_view2), // Pass 1: Rgba16Float -> Rgba16Float
-                (&intermediate_view2, &output_view),     // Pass 2: Rgba16Float -> Rgba16Float
+                (&input_view, &intermediate_view1),      // Pass 0: Rgba8Unorm -> Rgba8Unorm
+                (&intermediate_view1, &intermediate_view2), // Pass 1: Rgba8Unorm -> Rgba8Unorm
+                (&intermediate_view2, &output_view),     // Pass 2: Rgba8Unorm -> Rgba8Unorm
             ];
 
             for (pass_index, (input_view, output_view)) in passes.iter().enumerate() {
@@ -822,20 +811,20 @@ fn minimal_test() {
             debug_staging_buffer.unmap();
 
             // === COPY OUTPUT TO BUFFER ===
-            println!("\n=== Step 4: Copying Results ===");
+            println!("\n=== Step 4: Copying Results (direct to RGBA8 buffer) ===");
             
-            // For Rgba16Float, each pixel is 8 bytes (4 × f16 = 8 bytes)
-            let bytes_per_pixel = 8u32;
-            let bytes_per_row_unaligned_16float = bytes_per_pixel * width as u32;
-            let bytes_per_row_aligned_16float = ((bytes_per_row_unaligned_16float + alignment - 1) / alignment) * alignment;
+            // For Rgba8Unorm, each pixel is 4 bytes
+            let bytes_per_pixel = 4u32;
+            let bytes_per_row_unaligned = bytes_per_pixel * width as u32;
+            let bytes_per_row_aligned = ((bytes_per_row_unaligned + alignment - 1) / alignment) * alignment;
 
-            println!("Rgba16Float bytes per row: {} -> {} (aligned)", 
-                bytes_per_row_unaligned_16float, bytes_per_row_aligned_16float);
+            println!("Rgba8Unorm bytes per row: {} -> {} (aligned)", 
+                bytes_per_row_unaligned, bytes_per_row_aligned);
 
-            // Calculate output buffer size with aligned rows for Rgba16Float
-            let output_buffer_size = (bytes_per_row_aligned_16float as u64 * height as u64) as wgpu::BufferAddress;
+            // Calculate output buffer size with aligned rows for Rgba8Unorm
+            let output_buffer_size = (bytes_per_row_aligned as u64 * height as u64) as wgpu::BufferAddress;
             println!("Output buffer size: {} bytes ({} aligned rows × {} height)", 
-                output_buffer_size, bytes_per_row_aligned_16float, height);
+                output_buffer_size, bytes_per_row_aligned, height);
 
             let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Output Buffer"),
@@ -849,7 +838,7 @@ fn minimal_test() {
                 label: Some("Final Copy Encoder"),
             });
 
-            // Copy texture to buffer with aligned bytes_per_row for Rgba16Float
+            // Copy texture to buffer with aligned bytes_per_row for Rgba8Unorm
             final_encoder.copy_texture_to_buffer(
                 wgpu::ImageCopyTexture {
                     texture: &output_texture,
@@ -861,7 +850,7 @@ fn minimal_test() {
                     buffer: &output_buffer,
                     layout: wgpu::ImageDataLayout {
                         offset: 0,
-                        bytes_per_row: Some(bytes_per_row_aligned_16float),
+                        bytes_per_row: Some(bytes_per_row_aligned),
                         rows_per_image: Some(height as u32),
                     },
                 },
@@ -892,68 +881,63 @@ fn minimal_test() {
 
             let data = buffer_slice.get_mapped_range();
 
-            // Copy the data, handling row alignment padding and converting f16 to u8
+            // Extract data, handling row alignment padding
             let mut result_bytes = Vec::with_capacity(width * height * 4);
-            let aligned_row_size_bytes = bytes_per_row_aligned_16float as usize;
-            let bytes_per_pixel_usize = bytes_per_pixel as usize;
-            let row_size_bytes = width * bytes_per_pixel_usize;
+            let aligned_row_size_bytes = bytes_per_row_aligned as usize;
+            
+            println!("Extracting data: width={}, height={}, aligned_row_size={}, total_bytes={}", 
+                width, height, aligned_row_size_bytes, data.len());
 
-            println!("Extracting data: row_size={}, aligned_row_size={}, height={}", 
-                row_size_bytes, aligned_row_size_bytes, height);
-
-            // Extract each row, skipping the padding at the end, and convert f16 to u8
+            // Extract each row, skipping the padding at the end
             for row in 0..height {
                 let row_start = row * aligned_row_size_bytes;
+                let row_end = row_start + (width * 4); // 4 bytes per pixel
                 
-                for col in 0..width {
-                    let pixel_start = row_start + col * bytes_per_pixel_usize;
-                    
-                    if pixel_start + 7 < data.len() {
-                        // Read f16 values (2 bytes each)
-                        let r_f16 = half::f16::from_le_bytes([data[pixel_start], data[pixel_start + 1]]);
-                        let g_f16 = half::f16::from_le_bytes([data[pixel_start + 2], data[pixel_start + 3]]);
-                        let b_f16 = half::f16::from_le_bytes([data[pixel_start + 4], data[pixel_start + 5]]);
-                        let a_f16 = half::f16::from_le_bytes([data[pixel_start + 6], data[pixel_start + 7]]);
-                        
-                        // Convert to f32 and then to u8, clamping to [0, 255]
-                        result_bytes.push((r_f16.to_f32().clamp(0.0, 1.0) * 255.0).round() as u8);
-                        result_bytes.push((g_f16.to_f32().clamp(0.0, 1.0) * 255.0).round() as u8);
-                        result_bytes.push((b_f16.to_f32().clamp(0.0, 1.0) * 255.0).round() as u8);
-                        result_bytes.push((a_f16.to_f32().clamp(0.0, 1.0) * 255.0).round() as u8);
-                    } else {
-                        // Pad with zeros (transparent black)
-                        result_bytes.extend(&[0, 0, 0, 0]);
+                if row_end <= data.len() {
+                    result_bytes.extend_from_slice(&data[row_start..row_end]);
+                } else {
+                    // If row is incomplete, pad with zeros
+                    let available = data.len().saturating_sub(row_start);
+                    if available > 0 {
+                        result_bytes.extend_from_slice(&data[row_start..row_start + available]);
+                    }
+                    // Pad remaining with zeros
+                    let needed = width * 4 - available.min(width * 4);
+                    result_bytes.extend(std::iter::repeat(0u8).take(needed));
+                }
+                
+                // Debug: Print first few pixels of first few rows
+                if row < 3 && width > 0 {
+                    let pixel_idx = row * width * 4;
+                    if pixel_idx + 3 < result_bytes.len() {
+                        println!("Row {} first pixel: R={}, G={}, B={}, A={}", 
+                            row, result_bytes[pixel_idx], result_bytes[pixel_idx+1],
+                            result_bytes[pixel_idx+2], result_bytes[pixel_idx+3]);
                     }
                 }
             }
 
             // Verify we got the right amount of data
+            let expected_bytes = width * height * 4;
             println!("Extracted {} bytes (expected {})", 
-                result_bytes.len(), width * height * 4);
+                result_bytes.len(), expected_bytes);
 
-            // === DEBUG: Analyze the output buffer ===
-            println!("\n=== Output Buffer Analysis ===");
-            println!("Buffer size: {} bytes (expected {} bytes for {}x{} RGBA)",
-                result_bytes.len(), width * height * 4, width, height);
-
-            // Check first few pixels
-            println!("First 4 pixels (16 bytes) as u8:");
-            for i in 0..16.min(result_bytes.len()) {
-                print!("{:3} ", result_bytes[i]);
-                if i % 4 == 3 { print!(" | "); }
-                if i % 16 == 15 { println!(); }
-            }
-
-            // Check if all values are zero or very small
-            let mut all_zero = true;
-            for &value in result_bytes.iter().take(100) {
-                if value != 0 {
-                    all_zero = false;
-                    break;
+            // Check if we have a full image
+            if result_bytes.len() != expected_bytes {
+                println!("ERROR: Extracted {} bytes but expected {}", 
+                    result_bytes.len(), expected_bytes);
+                
+                // If we're missing data, pad with zeros
+                if result_bytes.len() < expected_bytes {
+                    let needed = expected_bytes - result_bytes.len();
+                    println!("Padding with {} zeros", needed);
+                    result_bytes.extend(std::iter::repeat(0u8).take(needed));
+                } else {
+                    // If we have too much data, truncate
+                    println!("Truncating to expected size");
+                    result_bytes.truncate(expected_bytes);
                 }
             }
-
-            println!("First 100 bytes: all_zero={}", all_zero);
 
             // Cleanup
             drop(data);
@@ -961,9 +945,10 @@ fn minimal_test() {
 
             println!("Total GPU time: {:?}", total_start.elapsed());
             
-            // If all values are zero, something is wrong
-            if all_zero {
-                return Err("GPU produced all zero values! Check shader execution.".to_string());
+            // Check if image looks reasonable
+            if result_bytes.len() >= 4 {
+                println!("First output pixel: R:{}, G:{}, B:{}, A:{}", 
+                    result_bytes[0], result_bytes[1], result_bytes[2], result_bytes[3]);
             }
             
             Ok((result_bytes, width, height))

@@ -571,17 +571,11 @@ pub fn gaussian_blur_5x5(image: &[Vec<Pixel>], blur_alpha: bool) -> Vec<Vec<Pixe
 #[cfg(feature = "gpu")]
 pub use gpu_blur::GpuGaussianBlur;
 
-#[cfg(feature = "gpu")]
-pub use metal_gpu_blur::MetalGpuGaussianBlur;
-
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal_mps_blur::{MetalMPSBlur, blur_with_metal};
 
 #[cfg(feature = "gpu")]
 mod gpu_blur;
-
-#[cfg(feature = "gpu")]
-mod metal_gpu_blur;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod metal_mps_blur;
