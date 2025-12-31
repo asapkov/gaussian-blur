@@ -96,35 +96,50 @@ impl GpuGaussianBlur {
             let adapters = instance.enumerate_adapters(wgpu::Backends::all());
             println!("Found {} adapters", adapters.len());
 
-            let adapter = {
-                // First try to find integrated GPU
-                let mut found_adapter = None;
+            // First try to find integrated GPU
+            let mut found_adapter = None;
+            
+            for adapter in adapters.iter() {
+                let info = adapter.get_info();
+                println!("Found adapter: {} ({:?})", info.name, info.device_type);
                 
-                for adapter in adapters.iter() {
-                    let info = adapter.get_info();
-                    println!("Found adapter: {} ({:?})", info.name, info.device_type);
-                    
-                    if info.device_type == wgpu::DeviceType::IntegratedGpu {
-                        println!("Using integrated GPU: {}", info.name);
-                        found_adapter = Some(adapter);
-                        break;
-                    }
+                if info.device_type == wgpu::DeviceType::IntegratedGpu {
+                    println!("Using integrated GPU: {}", info.name);
+                    found_adapter = Some(adapter);
+                    break;
                 }
-                
-                // If no integrated GPU found, use the first available adapter
-                if let Some(adapter) = found_adapter {
-                    adapter.clone()
-                } else {
-                    println!("No integrated GPU found, requesting default adapter");
-                    instance
-                        .request_adapter(&wgpu::RequestAdapterOptions {
-                            power_preference: wgpu::PowerPreference::LowPower,
-                            force_fallback_adapter: false,
-                            compatible_surface: None,
-                        })
-                        .await
-                        .ok_or("Failed to find a suitable GPU adapter")?
-                }
+            }
+            
+            /*
+            // If no integrated GPU found, use the first available adapter
+            if let Some(adapter) = found_adapter {
+                adapter.clone()
+            } else {
+                println!("No integrated GPU found, requesting default adapter");
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        force_fallback_adapter: false,
+                        compatible_surface: None,
+                    })
+                    .await
+                    .ok_or("Failed to find a suitable GPU adapter")?
+            }
+            */
+
+            let adapter: wgpu::Adapter = if let Some(ref adp) = found_adapter {
+                // Dereference the &Adapter to clone the underlying handle
+                (*adp).clone()
+            } else {
+                println!("No integrated GPU found, requesting default adapter");
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        force_fallback_adapter: false,
+                        compatible_surface: None,
+                    })
+                    .await
+                    .ok_or("Failed to find a suitable GPU adapter")?
             };
 
             let info = adapter.get_info();
@@ -161,17 +176,19 @@ impl GpuGaussianBlur {
 
             println!("Requesting device with adapter's maximum limits...");
 
-            let (device, queue): (Device, Queue) = adapter
+            let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
                 .request_device(
-                    &DeviceDescriptor {
+                    &wgpu::DeviceDescriptor {
                         label: Some("Gaussian Blur Device"),
                         required_features: wgpu::Features::empty(),
-                        required_limits,
+                        // Use the limits of the adapter we just found
+                        required_limits: adapter.limits(),
+                        memory_hints: wgpu::MemoryHints::Performance,
                     },
                     None,
                 )
                 .await
-                .map_err(|e| format!("Failed to request device: {}", e))?;
+                .map_err(|e| format!("Failed to create device: {}", e))?;
 
             // Check actual device limits
             let device_limits = device.limits();
