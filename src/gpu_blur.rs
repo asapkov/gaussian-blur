@@ -100,29 +100,13 @@ impl GpuGaussianBlur {
                 let info = adapter.get_info();
                 println!("Found adapter: {} ({:?})", info.name, info.device_type);
 
-                if info.device_type == wgpu::DeviceType::IntegratedGpu {
-                    println!("Using integrated GPU: {}", info.name);
+                if info.device_type != wgpu::DeviceType::IntegratedGpu {
+                    // println!("Using integrated GPU: {}", info.name);
+                    println!("Using Nvidia GPU: {}", info.name);
                     found_adapter = Some(adapter);
                     break;
                 }
             }
-
-            /*
-            // If no integrated GPU found, use the first available adapter
-            if let Some(adapter) = found_adapter {
-                adapter.clone()
-            } else {
-                println!("No integrated GPU found, requesting default adapter");
-                instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::LowPower,
-                        force_fallback_adapter: false,
-                        compatible_surface: None,
-                    })
-                    .await
-                    .ok_or("Failed to find a suitable GPU adapter")?
-            }
-            */
 
             let adapter: wgpu::Adapter = if let Some(ref adp) = found_adapter {
                 // Dereference the &Adapter to clone the underlying handle
@@ -160,7 +144,7 @@ impl GpuGaussianBlur {
             );
 
             // Request the maximum limits the adapter supports
-            let required_limits = Limits {
+            let _required_limits = Limits {
                 max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
                 max_texture_dimension_3d: adapter_limits.max_texture_dimension_3d,
                 max_texture_array_layers: adapter_limits.max_texture_array_layers,
@@ -717,7 +701,7 @@ fn test_write() {
 
             // Submit and wait
             self.queue.submit(Some(test_encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             }); // CRITICAL: Wait for GPU
@@ -729,7 +713,7 @@ fn test_write() {
                 sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             }); // CRITICAL: Wait for mapping
@@ -812,7 +796,7 @@ fn test_write() {
                         label: Some("Clear Encoder"),
                     });
             self.queue.submit(Some(clear_encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             });
@@ -932,7 +916,7 @@ fn test_write() {
 
                 // Submit this pass and wait
                 self.queue.submit(Some(encoder.finish()));
-                self.device.poll(wgpu::PollType::Wait {
+                let _ = self.device.poll(wgpu::PollType::Wait {
                     submission_index: None,
                     timeout: None,
                 }); // Wait for GPU to finish
@@ -964,7 +948,7 @@ fn test_write() {
             );
             self.queue.submit(Some(debug_encoder.finish()));
 
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             }); // Wait for copy
@@ -975,7 +959,7 @@ fn test_write() {
                 debug_sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             }); // Wait for mapping
@@ -1076,7 +1060,7 @@ fn test_write() {
 
             // Submit final copy
             self.queue.submit(Some(final_encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             }); // Wait for GPU
@@ -1088,7 +1072,7 @@ fn test_write() {
                 sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             }); // Wait for mapping
