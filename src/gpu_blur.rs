@@ -2,13 +2,11 @@
 
 #[cfg(feature = "gpu")]
 use wgpu::{
-    util::DeviceExt, BindGroupDescriptor, BindGroupEntry,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Queue,
-    ComputePipeline,
-    ComputePipelineDescriptor, Device, DeviceDescriptor, Instance, Limits,
-    PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource,
-    StorageTextureAccess, TextureDescriptor, TextureViewDimension, TextureFormat,
-    PipelineLayout,
+    util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingType, ComputePipeline, ComputePipelineDescriptor, Device,
+    DeviceDescriptor, Instance, Limits, Maintain, PipelineLayout, PipelineLayoutDescriptor, Queue,
+    ShaderModuleDescriptor, ShaderSource, StorageTextureAccess, TextureDescriptor, TextureFormat,
+    TextureViewDimension,
 };
 
 #[cfg(feature = "gpu")]
@@ -19,8 +17,8 @@ use crate::Pixel;
 // Constants for optimized work distribution
 const WORKGROUP_SIZE_X: u32 = 16;
 const WORKGROUP_SIZE_Y: u32 = 16;
-const TILE_SIZE_X: u32 = 4;  // Each thread processes 4 pixels in X
-const TILE_SIZE_Y: u32 = 4;  // Each thread processes 4 pixels in Y
+const TILE_SIZE_X: u32 = 4; // Each thread processes 4 pixels in X
+const TILE_SIZE_Y: u32 = 4; // Each thread processes 4 pixels in Y
 const DEBUG_BUFFER_SIZE: usize = 1024; // Number of f32 values in debug buffer
 const BOX_BLUR_PASSES: u32 = 3; // Number of box blur passes to approximate Gaussian
 
@@ -35,7 +33,7 @@ struct ShaderParameters {
     blur_alpha: u32,
     _padding0: u32,
     sigma: f32,
-    current_pass: u32,  // Which pass we're on (0, 1, or 2 for box blur approximation)
+    current_pass: u32, // Which pass we're on (0, 1, or 2 for box blur approximation)
     _padding1: f32,
     _padding2: f32,
     _padding3: f32,
@@ -80,12 +78,12 @@ impl GpuGaussianBlur {
     /// Create a new GPU Gaussian Blur processor
     pub async fn new(sigma: f32, radius: Option<i32>, blur_alpha: bool) -> Result<Self, String> {
         let radius = radius.unwrap_or_else(|| (3.0 * sigma).ceil() as i32);
-        
+
         #[cfg(not(feature = "gpu"))]
         {
             return Err("GPU feature not enabled. Build with --features gpu".to_string());
         }
-        
+
         #[cfg(feature = "gpu")]
         {
             // Initialize wgpu
@@ -98,18 +96,18 @@ impl GpuGaussianBlur {
 
             // First try to find integrated GPU
             let mut found_adapter = None;
-            
+
             for adapter in adapters.iter() {
                 let info = adapter.get_info();
                 println!("Found adapter: {} ({:?})", info.name, info.device_type);
-                
+
                 if info.device_type == wgpu::DeviceType::IntegratedGpu {
                     println!("Using integrated GPU: {}", info.name);
                     found_adapter = Some(adapter);
                     break;
                 }
             }
-            
+
             /*
             // If no integrated GPU found, use the first available adapter
             if let Some(adapter) = found_adapter {
@@ -148,10 +146,19 @@ impl GpuGaussianBlur {
             // Get adapter limits
             let adapter_limits = adapter.limits();
             println!("Adapter limits:");
-            println!("  max_texture_dimension_2d: {}", adapter_limits.max_texture_dimension_2d);
-            println!("  max_storage_buffer_binding_size: {}", adapter_limits.max_storage_buffer_binding_size);
+            println!(
+                "  max_texture_dimension_2d: {}",
+                adapter_limits.max_texture_dimension_2d
+            );
+            println!(
+                "  max_storage_buffer_binding_size: {}",
+                adapter_limits.max_storage_buffer_binding_size
+            );
             println!("  max_buffer_size: {}", adapter_limits.max_buffer_size);
-            println!("  max_compute_workgroups_per_dimension: {}", adapter_limits.max_compute_workgroups_per_dimension);
+            println!(
+                "  max_compute_workgroups_per_dimension: {}",
+                adapter_limits.max_compute_workgroups_per_dimension
+            );
 
             // Request the maximum limits the adapter supports
             let required_limits = Limits {
@@ -161,16 +168,23 @@ impl GpuGaussianBlur {
                 max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
                 max_uniform_buffer_binding_size: adapter_limits.max_uniform_buffer_binding_size,
                 max_buffer_size: adapter_limits.max_buffer_size,
-                max_storage_buffers_per_shader_stage: adapter_limits.max_storage_buffers_per_shader_stage,
-                max_uniform_buffers_per_shader_stage: adapter_limits.max_uniform_buffers_per_shader_stage,
-                max_sampled_textures_per_shader_stage: adapter_limits.max_sampled_textures_per_shader_stage,
-                max_storage_textures_per_shader_stage: adapter_limits.max_storage_textures_per_shader_stage,
-                max_compute_workgroup_storage_size: adapter_limits.max_compute_workgroup_storage_size,
-                max_compute_invocations_per_workgroup: adapter_limits.max_compute_invocations_per_workgroup,
+                max_storage_buffers_per_shader_stage: adapter_limits
+                    .max_storage_buffers_per_shader_stage,
+                max_uniform_buffers_per_shader_stage: adapter_limits
+                    .max_uniform_buffers_per_shader_stage,
+                max_sampled_textures_per_shader_stage: adapter_limits
+                    .max_sampled_textures_per_shader_stage,
+                max_storage_textures_per_shader_stage: adapter_limits
+                    .max_storage_textures_per_shader_stage,
+                max_compute_workgroup_storage_size: adapter_limits
+                    .max_compute_workgroup_storage_size,
+                max_compute_invocations_per_workgroup: adapter_limits
+                    .max_compute_invocations_per_workgroup,
                 max_compute_workgroup_size_x: adapter_limits.max_compute_workgroup_size_x,
                 max_compute_workgroup_size_y: adapter_limits.max_compute_workgroup_size_y,
                 max_compute_workgroup_size_z: adapter_limits.max_compute_workgroup_size_z,
-                max_compute_workgroups_per_dimension: adapter_limits.max_compute_workgroups_per_dimension,
+                max_compute_workgroups_per_dimension: adapter_limits
+                    .max_compute_workgroups_per_dimension,
                 ..adapter_limits
             };
 
@@ -181,26 +195,37 @@ impl GpuGaussianBlur {
                     &wgpu::DeviceDescriptor {
                         label: Some("Gaussian Blur Device"),
                         required_features: wgpu::Features::empty(),
-                        // Use the limits of the adapter we just found
                         required_limits: adapter.limits(),
-                        memory_hints: wgpu::MemoryHints::Performance,
+                        memory_hints: wgpu::MemoryHints::Performance, // Required in 2025/2026
                     },
                     None,
                 )
                 .await
-                .map_err(|e| format!("Failed to create device: {}", e))?;
+                .expect("Failed to create device");
 
             // Check actual device limits
             let device_limits = device.limits();
             println!("Device granted limits:");
-            println!("  max_texture_dimension_2d: {}", device_limits.max_texture_dimension_2d);
-            println!("  max_storage_buffer_binding_size: {}", device_limits.max_storage_buffer_binding_size);
+            println!(
+                "  max_texture_dimension_2d: {}",
+                device_limits.max_texture_dimension_2d
+            );
+            println!(
+                "  max_storage_buffer_binding_size: {}",
+                device_limits.max_storage_buffer_binding_size
+            );
             println!("  max_buffer_size: {}", device_limits.max_buffer_size);
-            println!("  max_compute_workgroups_per_dimension: {}", device_limits.max_compute_workgroups_per_dimension);
+            println!(
+                "  max_compute_workgroups_per_dimension: {}",
+                device_limits.max_compute_workgroups_per_dimension
+            );
 
             // Load shader with box blur implementation
             let shader_source = include_str!("shaders/gaussian_blur_box.wgsl");
-            println!("Shader source loaded, length: {} bytes", shader_source.len());
+            println!(
+                "Shader source loaded, length: {} bytes",
+                shader_source.len()
+            );
 
             let shader = device.create_shader_module(ShaderModuleDescriptor {
                 label: Some("Gaussian Blur Box Approximation Shader"),
@@ -259,20 +284,22 @@ impl GpuGaussianBlur {
             });
 
             // Create pipeline layout
-            let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some("Box Blur Pipeline Layout"),
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Blur Layout"),
                 bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
+                immediate_size: None, // Replaces push_constant_ranges
             });
 
             // Create compute pipeline for box blur
-            let box_blur_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-                label: Some("Box Blur Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: "box_blur_pass",
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            });
+            let box_blur_pipeline =
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("Box Blur Pipeline"),
+                    layout: Some(&pipeline_layout),
+                    module: &shader_module,
+                    entry_point: Some("box_blur_pass"), // Now requires Some()
+                    compilation_options: wgpu::PipelineCompilationOptions::default(), // Required in v22+
+                    cache: None, // Required field in 2026 versions
+                });
 
             Ok(Self {
                 device,
@@ -291,7 +318,7 @@ impl GpuGaussianBlur {
     pub fn validate_sigma(&self) -> Result<(), String> {
         println!("=== Sigma Validation ===");
         println!("Sigma: {}, Computed Radius: {}", self.sigma, self.radius);
-        
+
         // For very large sigma, use box blur approximation
         if self.sigma > 50.0 {
             let box_radius = self.calculate_box_radius();
@@ -299,7 +326,7 @@ impl GpuGaussianBlur {
                 self.sigma, box_radius, BOX_BLUR_PASSES);
             println!("This will be much faster and avoid GPU timeouts.");
         }
-        
+
         Ok(())
     }
 
@@ -313,15 +340,15 @@ impl GpuGaussianBlur {
     /// Apply blur to an image and return as 2D pixel array
     pub fn blur(&self, image: &[Vec<Pixel>]) -> Result<Vec<Vec<Pixel>>, String> {
         let (bytes, width, height) = self.blur_to_bytes(image)?;
-        
+
         if width == 0 || height == 0 {
             return Ok(Vec::new());
         }
-        
+
         // Convert bytes back to pixels
         let mut result = Vec::with_capacity(height);
         let mut offset = 0;
-        
+
         for _ in 0..height {
             let mut row = Vec::with_capacity(width);
             for _ in 0..width {
@@ -335,7 +362,7 @@ impl GpuGaussianBlur {
             }
             result.push(row);
         }
-        
+
         Ok(result)
     }
 
@@ -385,8 +412,10 @@ impl GpuGaussianBlur {
             }
 
             // Convert image to flat RGBA bytes
-            println!("Input texture first pixel: R:{}, G:{}, B:{}, A:{}", 
-                image[0][0].r, image[0][0].g, image[0][0].b, image[0][0].a);
+            println!(
+                "Input texture first pixel: R:{}, G:{}, B:{}, A:{}",
+                image[0][0].r, image[0][0].g, image[0][0].b, image[0][0].a
+            );
 
             let mut rgba_data = Vec::with_capacity(width * height * 4);
             for row in image {
@@ -417,38 +446,41 @@ impl GpuGaussianBlur {
             // Write image data to texture with proper bytes per row alignment
             let bytes_per_row_unaligned = 4 * width as u32;
             let alignment = 256; // wgpu's COPY_BYTES_PER_ROW_ALIGNMENT
-            let bytes_per_row_aligned = ((bytes_per_row_unaligned + alignment - 1) / alignment) * alignment;
-            
-            println!("Bytes per row alignment: {} -> {} (aligned to {} bytes)", 
-                bytes_per_row_unaligned, bytes_per_row_aligned, alignment);
+            let bytes_per_row_aligned =
+                ((bytes_per_row_unaligned + alignment - 1) / alignment) * alignment;
+
+            println!(
+                "Bytes per row alignment: {} -> {} (aligned to {} bytes)",
+                bytes_per_row_unaligned, bytes_per_row_aligned, alignment
+            );
 
             // If the data needs padding for alignment, create a padded copy
             if bytes_per_row_aligned != bytes_per_row_unaligned {
                 println!("Creating aligned data buffer...");
                 let aligned_row_size = bytes_per_row_aligned as usize;
                 let unaligned_row_size = bytes_per_row_unaligned as usize;
-                
+
                 let mut aligned_data = Vec::with_capacity(aligned_row_size * height);
-                
+
                 for row in 0..height {
                     let row_start = row * unaligned_row_size;
                     let row_end = row_start + unaligned_row_size;
                     aligned_data.extend_from_slice(&rgba_data[row_start..row_end]);
-                    
+
                     // Add padding
                     let padding = aligned_row_size - unaligned_row_size;
                     aligned_data.extend(std::iter::repeat(0u8).take(padding));
                 }
-                
+
                 self.queue.write_texture(
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: &input_texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
                     &aligned_data,
-                    wgpu::ImageDataLayout {
+                    wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row_aligned),
                         rows_per_image: Some(height as u32),
@@ -462,14 +494,14 @@ impl GpuGaussianBlur {
             } else {
                 // No alignment needed
                 self.queue.write_texture(
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: &input_texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
                     &rgba_data,
-                    wgpu::ImageDataLayout {
+                    wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row_aligned),
                         rows_per_image: Some(height as u32),
@@ -485,9 +517,9 @@ impl GpuGaussianBlur {
             let input_view = input_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Define usage for intermediate textures (need both read and write capabilities)
-            let intermediate_usage = wgpu::TextureUsages::STORAGE_BINDING | 
-                                     wgpu::TextureUsages::TEXTURE_BINDING |
-                                     wgpu::TextureUsages::COPY_SRC;
+            let intermediate_usage = wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC;
 
             // Create intermediate texture 1 (Rgba8Unorm storage)
             let intermediate_texture1 = self.device.create_texture(&TextureDescriptor {
@@ -505,7 +537,8 @@ impl GpuGaussianBlur {
                 view_formats: &[TextureFormat::Rgba8Unorm],
             });
 
-            let intermediate_view1 = intermediate_texture1.create_view(&wgpu::TextureViewDescriptor::default());
+            let intermediate_view1 =
+                intermediate_texture1.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Create intermediate texture 2 (Rgba8Unorm storage)
             let intermediate_texture2 = self.device.create_texture(&TextureDescriptor {
@@ -523,7 +556,8 @@ impl GpuGaussianBlur {
                 view_formats: &[TextureFormat::Rgba8Unorm],
             });
 
-            let intermediate_view2 = intermediate_texture2.create_view(&wgpu::TextureViewDescriptor::default());
+            let intermediate_view2 =
+                intermediate_texture2.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Create output texture (write-only storage, Rgba8Unorm)
             let output_texture = self.device.create_texture(&TextureDescriptor {
@@ -537,19 +571,21 @@ impl GpuGaussianBlur {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | 
-                       wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[TextureFormat::Rgba8Unorm],
             });
 
             let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Create debug buffer
-            let debug_buffer_size_bytes = (DEBUG_BUFFER_SIZE * std::mem::size_of::<f32>()) as wgpu::BufferAddress;
+            let debug_buffer_size_bytes =
+                (DEBUG_BUFFER_SIZE * std::mem::size_of::<f32>()) as wgpu::BufferAddress;
             let debug_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Debug Buffer"),
                 size: debug_buffer_size_bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
 
@@ -559,7 +595,7 @@ impl GpuGaussianBlur {
 
             // === STEP 1: Test direct write to output texture ===
             println!("\n=== Step 1: Testing Direct Texture Write ===");
-            
+
             let test_shader_source = r#"
 @group(0) @binding(1) var output_texture: texture_storage_2d<rgba8unorm, write>;
 
@@ -578,13 +614,15 @@ fn test_write() {
                 source: ShaderSource::Wgsl(test_shader_source.into()),
             });
 
-            let test_pipeline = self.device.create_compute_pipeline(&ComputePipelineDescriptor {
-                label: Some("Test Write Pipeline"),
-                layout: Some(&self.pipeline_layout),
-                module: &test_shader,
-                entry_point: "test_write",
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            });
+            let test_pipeline = self
+                .device
+                .create_compute_pipeline(&ComputePipelineDescriptor {
+                    label: Some("Test Write Pipeline"),
+                    layout: Some(&self.pipeline_layout),
+                    module: &test_shader,
+                    entry_point: "test_write",
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                });
 
             // Create a temporary bind group for test
             let test_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
@@ -604,7 +642,8 @@ fn test_write() {
                         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: &self.device.create_buffer(&wgpu::BufferDescriptor {
                                 label: Some("Dummy Params"),
-                                size: std::mem::size_of::<ShaderParameters>() as wgpu::BufferAddress,
+                                size: std::mem::size_of::<ShaderParameters>()
+                                    as wgpu::BufferAddress,
                                 usage: wgpu::BufferUsages::UNIFORM,
                                 mapped_at_creation: false,
                             }),
@@ -620,15 +659,18 @@ fn test_write() {
             });
 
             // Run test
-            let mut test_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Test Encoder"),
-            });
+            let mut test_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Test Encoder"),
+                    });
 
             {
-                let mut compute_pass = test_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Test Compute Pass"),
-                    timestamp_writes: None,
-                });
+                let mut compute_pass =
+                    test_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("Test Compute Pass"),
+                        timestamp_writes: None,
+                    });
                 compute_pass.set_pipeline(&test_pipeline);
                 compute_pass.set_bind_group(0, &test_bind_group, &[]);
                 compute_pass.dispatch_workgroups(1, 1, 1);
@@ -637,11 +679,13 @@ fn test_write() {
             // For Rgba8Unorm, each pixel is 4 bytes
             let bytes_per_pixel = 4u32;
             let bytes_per_row_unaligned = bytes_per_pixel * width as u32;
-            let bytes_per_row_aligned = ((bytes_per_row_unaligned + alignment - 1) / alignment) * alignment;
+            let bytes_per_row_aligned =
+                ((bytes_per_row_unaligned + alignment - 1) / alignment) * alignment;
 
             // Calculate output buffer size with aligned rows for Rgba8Unorm
-            let output_buffer_size = (bytes_per_row_aligned as u64 * height as u64) as wgpu::BufferAddress;
-            
+            let output_buffer_size =
+                (bytes_per_row_aligned as u64 * height as u64) as wgpu::BufferAddress;
+
             let test_output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Test Output Buffer"),
                 size: output_buffer_size,
@@ -651,15 +695,15 @@ fn test_write() {
 
             // Copy texture to buffer
             test_encoder.copy_texture_to_buffer(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &output_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::ImageCopyBuffer {
+                wgpu::TexelCopyBufferInfo {
                     buffer: &test_output_buffer,
-                    layout: wgpu::ImageDataLayout {
+                    layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row_aligned),
                         rows_per_image: Some(height as u32),
@@ -674,7 +718,7 @@ fn test_write() {
 
             // Submit and wait
             self.queue.submit(Some(test_encoder.finish()));
-            self.device.poll(wgpu::Maintain::Wait); // CRITICAL: Wait for GPU
+            self.device.poll(wgpu::Maintain::wait()); // CRITICAL: Wait for GPU
 
             // Read back test results
             let buffer_slice = test_output_buffer.slice(..);
@@ -700,38 +744,43 @@ fn test_write() {
                             ));
                         }
                     }
-                    
+
                     println!("Test pixels (should be red, green, blue, white):");
                     for (i, (r, g, b, a)) in test_pixels.iter().enumerate() {
                         println!("  Pixel {}: R={}, G={}, B={}, A={}", i, r, g, b, a);
                     }
-                    
+
                     // Check if we got expected colors (within tolerance)
                     let expected = vec![
-                        (255, 0, 0, 255),   // Red
-                        (0, 255, 0, 255),   // Green  
-                        (0, 0, 255, 255),   // Blue
+                        (255, 0, 0, 255),     // Red
+                        (0, 255, 0, 255),     // Green
+                        (0, 0, 255, 255),     // Blue
                         (255, 255, 255, 255), // White
                     ];
-                    
+
                     let mut passed = true;
-                    for (i, ((actual_r, actual_g, actual_b, actual_a), (exp_r, exp_g, exp_b, exp_a))) in 
-                        test_pixels.iter().zip(expected.iter()).enumerate() {
-                        
+                    for (
+                        i,
+                        ((actual_r, actual_g, actual_b, actual_a), (exp_r, exp_g, exp_b, exp_a)),
+                    ) in test_pixels.iter().zip(expected.iter()).enumerate()
+                    {
                         let close = |a: u8, b: u8| (a as i32 - b as i32).abs() < 10;
-                        if !close(*actual_r, *exp_r) || !close(*actual_g, *exp_g) || 
-                           !close(*actual_b, *exp_b) || !close(*actual_a, *exp_a) {
+                        if !close(*actual_r, *exp_r)
+                            || !close(*actual_g, *exp_g)
+                            || !close(*actual_b, *exp_b)
+                            || !close(*actual_a, *exp_a)
+                        {
                             println!("✗ Pixel {} doesn't match expected color", i);
                             passed = false;
                         }
                     }
-                    
+
                     if passed {
                         println!("✓ Texture write test passed");
                     } else {
                         println!("✗ Texture write test failed");
                     }
-                    
+
                     passed
                 }
                 Ok(Err(e)) => {
@@ -752,30 +801,39 @@ fn test_write() {
 
             // Clear output texture for actual blur
             println!("Clearing output texture for blur passes...");
-            let clear_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Clear Encoder"),
-            });
+            let clear_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Clear Encoder"),
+                    });
             self.queue.submit(Some(clear_encoder.finish()));
             self.device.poll(wgpu::Maintain::Wait);
 
             // === STEP 2: Multiple Box Blur Passes ===
             println!("\n=== Step 2: Multiple Box Blur Passes (approximates Gaussian) ===");
-            
+
             // Calculate box radius for approximation
             let box_radius = self.calculate_box_radius();
-            println!("Using box blur approximation: radius={} for {} passes", box_radius, BOX_BLUR_PASSES);
+            println!(
+                "Using box blur approximation: radius={} for {} passes",
+                box_radius, BOX_BLUR_PASSES
+            );
             println!("This approximates Gaussian with sigma={}", self.sigma);
 
             // Define clear pass structure: (input_view, output_view)
             let passes = [
-                (&input_view, &intermediate_view1),      // Pass 0: Rgba8Unorm -> Rgba8Unorm
+                (&input_view, &intermediate_view1), // Pass 0: Rgba8Unorm -> Rgba8Unorm
                 (&intermediate_view1, &intermediate_view2), // Pass 1: Rgba8Unorm -> Rgba8Unorm
-                (&intermediate_view2, &output_view),     // Pass 2: Rgba8Unorm -> Rgba8Unorm
+                (&intermediate_view2, &output_view), // Pass 2: Rgba8Unorm -> Rgba8Unorm
             ];
 
             for (pass_index, (input_view, output_view)) in passes.iter().enumerate() {
-                println!("\n--- Box Blur Pass {} of {} ---", pass_index + 1, BOX_BLUR_PASSES);
-                
+                println!(
+                    "\n--- Box Blur Pass {} of {} ---",
+                    pass_index + 1,
+                    BOX_BLUR_PASSES
+                );
+
                 let params = ShaderParameters {
                     width: width as u32,
                     height: height as u32,
@@ -800,13 +858,15 @@ fn test_write() {
                     _padding14: 0.0,
                     _padding15: 0.0,
                 };
-                
-                let params_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("Parameters Buffer Pass {}", pass_index)),
-                    contents: bytemuck::cast_slice(&[params]),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-                
+
+                let params_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some(&format!("Parameters Buffer Pass {}", pass_index)),
+                            contents: bytemuck::cast_slice(&[params]),
+                            usage: wgpu::BufferUsages::UNIFORM,
+                        });
+
                 // Create bind group for this pass
                 let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                     label: Some(&format!("Box Blur Bind Group Pass {}", pass_index)),
@@ -830,34 +890,42 @@ fn test_write() {
                         },
                     ],
                 });
-                
-                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some(&format!("Box Blur Encoder Pass {}", pass_index)),
-                });
-                
+
+                let mut encoder =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some(&format!("Box Blur Encoder Pass {}", pass_index)),
+                        });
+
                 {
-                    let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some(&format!("Box Blur Compute Pass {}", pass_index)),
-                        timestamp_writes: None,
-                    });
-                    
+                    let mut compute_pass =
+                        encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some(&format!("Box Blur Compute Pass {}", pass_index)),
+                            timestamp_writes: None,
+                        });
+
                     compute_pass.set_pipeline(&self.box_blur_pipeline);
                     compute_pass.set_bind_group(0, &bind_group, &[]);
-                    
+
                     // Optimized dispatch for tiled processing
                     let effective_width = (width as u32 + TILE_SIZE_X - 1) / TILE_SIZE_X;
                     let effective_height = (height as u32 + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
-                    let dispatch_width = (effective_width + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-                    let dispatch_height = (effective_height + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
-                    
-                    println!("Dispatch: {}x{} workgroups", dispatch_width, dispatch_height);
+                    let dispatch_width =
+                        (effective_width + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
+                    let dispatch_height =
+                        (effective_height + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
+
+                    println!(
+                        "Dispatch: {}x{} workgroups",
+                        dispatch_width, dispatch_height
+                    );
                     compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
                 }
-                
+
                 // Submit this pass and wait
                 self.queue.submit(Some(encoder.finish()));
                 self.device.poll(wgpu::Maintain::Wait); // Wait for GPU to finish
-                
+
                 println!("Pass {} completed", pass_index + 1);
             }
 
@@ -871,12 +939,20 @@ fn test_write() {
             });
 
             // Copy debug buffer to staging buffer
-            let mut debug_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Debug Readback Encoder"),
-            });
-            debug_encoder.copy_buffer_to_buffer(&debug_buffer, 0, &debug_staging_buffer, 0, debug_buffer_size_bytes);
+            let mut debug_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Debug Readback Encoder"),
+                    });
+            debug_encoder.copy_buffer_to_buffer(
+                &debug_buffer,
+                0,
+                &debug_staging_buffer,
+                0,
+                debug_buffer_size_bytes,
+            );
             self.queue.submit(Some(debug_encoder.finish()));
-            
+
             self.device.poll(wgpu::Maintain::Wait); // Wait for copy
 
             let debug_slice = debug_staging_buffer.slice(..);
@@ -899,7 +975,7 @@ fn test_write() {
             let mut debug_values = Vec::new();
             for i in 0..(debug_bytes.len() / 4).min(100) {
                 let offset = i * 4;
-                let value_bytes: [u8; 4] = debug_bytes[offset..offset+4].try_into().unwrap();
+                let value_bytes: [u8; 4] = debug_bytes[offset..offset + 4].try_into().unwrap();
                 let value = f32::from_le_bytes(value_bytes);
                 debug_values.push(value);
             }
@@ -917,9 +993,14 @@ fn test_write() {
                 for i in 0..4 {
                     let offset = (5 + (pass as usize) * 20 + i * 4) as usize;
                     if offset + 3 < debug_values.len() {
-                        println!("  Pixel {}: R={:.1}, G={:.1}, B={:.1}, A={:.1}", 
-                            i, debug_values[offset], debug_values[offset+1], 
-                            debug_values[offset+2], debug_values[offset+3]);
+                        println!(
+                            "  Pixel {}: R={:.1}, G={:.1}, B={:.1}, A={:.1}",
+                            i,
+                            debug_values[offset],
+                            debug_values[offset + 1],
+                            debug_values[offset + 2],
+                            debug_values[offset + 3]
+                        );
                     }
                 }
             }
@@ -929,11 +1010,15 @@ fn test_write() {
 
             // === COPY OUTPUT TO BUFFER ===
             println!("\n=== Step 4: Copying Results (direct to RGBA8 buffer) ===");
-            
-            println!("Rgba8Unorm bytes per row: {} -> {} (aligned)", 
-                bytes_per_row_unaligned, bytes_per_row_aligned);
-            println!("Output buffer size: {} bytes ({} aligned rows × {} height)", 
-                output_buffer_size, bytes_per_row_aligned, height);
+
+            println!(
+                "Rgba8Unorm bytes per row: {} -> {} (aligned)",
+                bytes_per_row_unaligned, bytes_per_row_aligned
+            );
+            println!(
+                "Output buffer size: {} bytes ({} aligned rows × {} height)",
+                output_buffer_size, bytes_per_row_aligned, height
+            );
 
             let final_output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Final Output Buffer"),
@@ -943,21 +1028,23 @@ fn test_write() {
             });
 
             // Create encoder for final copy
-            let mut final_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Final Copy Encoder"),
-            });
+            let mut final_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Final Copy Encoder"),
+                    });
 
             // Copy texture to buffer with aligned bytes_per_row for Rgba8Unorm
             final_encoder.copy_texture_to_buffer(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &output_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::ImageCopyBuffer {
+                wgpu::TexelCopyBufferInfo {
                     buffer: &final_output_buffer,
-                    layout: wgpu::ImageDataLayout {
+                    layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row_aligned),
                         rows_per_image: Some(height as u32),
@@ -993,15 +1080,20 @@ fn test_write() {
             // Extract data, handling row alignment padding
             let mut result_bytes = Vec::with_capacity(width * height * 4);
             let aligned_row_size_bytes = bytes_per_row_aligned as usize;
-            
-            println!("Extracting data: width={}, height={}, aligned_row_size={}, total_bytes={}", 
-                width, height, aligned_row_size_bytes, data.len());
+
+            println!(
+                "Extracting data: width={}, height={}, aligned_row_size={}, total_bytes={}",
+                width,
+                height,
+                aligned_row_size_bytes,
+                data.len()
+            );
 
             // Extract each row, skipping the padding at the end
             for row in 0..height {
                 let row_start = row * aligned_row_size_bytes;
                 let row_end = row_start + (width * 4); // 4 bytes per pixel
-                
+
                 if row_end <= data.len() {
                     result_bytes.extend_from_slice(&data[row_start..row_end]);
                 } else {
@@ -1014,28 +1106,39 @@ fn test_write() {
                     let needed = width * 4 - available.min(width * 4);
                     result_bytes.extend(std::iter::repeat(0u8).take(needed));
                 }
-                
+
                 // Debug: Print first few pixels of first few rows
                 if row < 3 && width > 0 {
                     let pixel_idx = row * width * 4;
                     if pixel_idx + 3 < result_bytes.len() {
-                        println!("Row {} first pixel: R={}, G={}, B={}, A={}", 
-                            row, result_bytes[pixel_idx], result_bytes[pixel_idx+1],
-                            result_bytes[pixel_idx+2], result_bytes[pixel_idx+3]);
+                        println!(
+                            "Row {} first pixel: R={}, G={}, B={}, A={}",
+                            row,
+                            result_bytes[pixel_idx],
+                            result_bytes[pixel_idx + 1],
+                            result_bytes[pixel_idx + 2],
+                            result_bytes[pixel_idx + 3]
+                        );
                     }
                 }
             }
 
             // Verify we got the right amount of data
             let expected_bytes = width * height * 4;
-            println!("Extracted {} bytes (expected {})", 
-                result_bytes.len(), expected_bytes);
+            println!(
+                "Extracted {} bytes (expected {})",
+                result_bytes.len(),
+                expected_bytes
+            );
 
             // Check if we have a full image
             if result_bytes.len() != expected_bytes {
-                println!("ERROR: Extracted {} bytes but expected {}", 
-                    result_bytes.len(), expected_bytes);
-                
+                println!(
+                    "ERROR: Extracted {} bytes but expected {}",
+                    result_bytes.len(),
+                    expected_bytes
+                );
+
                 // If we're missing data, pad with zeros
                 if result_bytes.len() < expected_bytes {
                     let needed = expected_bytes - result_bytes.len();
@@ -1053,12 +1156,14 @@ fn test_write() {
             final_output_buffer.unmap();
 
             println!("Total GPU time: {:?}", total_start.elapsed());
-            
+
             // Check if image looks reasonable
             if result_bytes.len() >= 4 {
-                println!("First output pixel: R:{}, G:{}, B:{}, A:{}", 
-                    result_bytes[0], result_bytes[1], result_bytes[2], result_bytes[3]);
-                
+                println!(
+                    "First output pixel: R:{}, G:{}, B:{}, A:{}",
+                    result_bytes[0], result_bytes[1], result_bytes[2], result_bytes[3]
+                );
+
                 // Check if we have non-zero data
                 let mut has_non_zero = false;
                 for &value in result_bytes.iter().take(100) {
@@ -1067,12 +1172,12 @@ fn test_write() {
                         break;
                     }
                 }
-                
+
                 if !has_non_zero {
                     println!("WARNING: First 100 bytes are all zero!");
                 }
             }
-            
+
             Ok((result_bytes, width, height))
         }
     }
