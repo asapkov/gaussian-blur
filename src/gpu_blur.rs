@@ -4,7 +4,7 @@
 use wgpu::{
     util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, ComputePipeline, ComputePipelineDescriptor, Device,
-    DeviceDescriptor, Instance, Limits, Maintain, PipelineLayout, PipelineLayoutDescriptor, Queue,
+    DeviceDescriptor, Instance, Limits, PipelineLayout, PipelineLayoutDescriptor, Queue,
     ShaderModuleDescriptor, ShaderSource, StorageTextureAccess, TextureDescriptor, TextureFormat,
     TextureViewDimension,
 };
@@ -91,7 +91,7 @@ impl GpuGaussianBlur {
 
             // Try to find integrated GPU first
             println!("Looking for integrated GPU...");
-            let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+            let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
             println!("Found {} adapters", adapters.len());
 
             // First try to find integrated GPU
@@ -137,7 +137,7 @@ impl GpuGaussianBlur {
                         compatible_surface: None,
                     })
                     .await
-                    .ok_or("Failed to find a suitable GPU adapter")?
+                    .expect("Failed to find a suitable GPU adapter")
             };
 
             let info = adapter.get_info();
@@ -196,7 +196,9 @@ impl GpuGaussianBlur {
                         label: Some("Gaussian Blur Device"),
                         required_features: wgpu::Features::empty(),
                         required_limits: adapter.limits(),
-                        memory_hints: wgpu::MemoryHints::Performance, // Required in 2025/2026
+                        memory_hints: wgpu::MemoryHints::Performance,
+                        experimental_features: Default::default(), // Required in v22+
+                        trace: None,                               // Required in v22+
                     },
                     None,
                 )
@@ -287,7 +289,7 @@ impl GpuGaussianBlur {
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Blur Layout"),
                 bind_group_layouts: &[&bind_group_layout],
-                immediate_size: None, // Replaces push_constant_ranges
+                immediate_size: 0, // Replaces push_constant_ranges
             });
 
             // Create compute pipeline for box blur
@@ -295,7 +297,7 @@ impl GpuGaussianBlur {
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("Box Blur Pipeline"),
                     layout: Some(&pipeline_layout),
-                    module: &shader_module,
+                    module: &shader,
                     entry_point: Some("box_blur_pass"), // Now requires Some()
                     compilation_options: wgpu::PipelineCompilationOptions::default(), // Required in v22+
                     cache: None, // Required field in 2026 versions
@@ -718,7 +720,7 @@ fn test_write() {
 
             // Submit and wait
             self.queue.submit(Some(test_encoder.finish()));
-            self.device.poll(wgpu::Maintain::wait()); // CRITICAL: Wait for GPU
+            self.device.poll(wgpu::PollType::Wait); // CRITICAL: Wait for GPU
 
             // Read back test results
             let buffer_slice = test_output_buffer.slice(..);
@@ -727,7 +729,7 @@ fn test_write() {
                 sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::Maintain::Wait); // CRITICAL: Wait for mapping
+            self.device.poll(wgpu::PollType::Wait); // CRITICAL: Wait for mapping
 
             let test_result = match receiver.recv() {
                 Ok(Ok(())) => {
@@ -807,7 +809,7 @@ fn test_write() {
                         label: Some("Clear Encoder"),
                     });
             self.queue.submit(Some(clear_encoder.finish()));
-            self.device.poll(wgpu::Maintain::Wait);
+            self.device.poll(wgpu::PollType::Wait);
 
             // === STEP 2: Multiple Box Blur Passes ===
             println!("\n=== Step 2: Multiple Box Blur Passes (approximates Gaussian) ===");
@@ -924,7 +926,7 @@ fn test_write() {
 
                 // Submit this pass and wait
                 self.queue.submit(Some(encoder.finish()));
-                self.device.poll(wgpu::Maintain::Wait); // Wait for GPU to finish
+                self.device.poll(wgpu::PollType::Wait); // Wait for GPU to finish
 
                 println!("Pass {} completed", pass_index + 1);
             }
@@ -953,7 +955,7 @@ fn test_write() {
             );
             self.queue.submit(Some(debug_encoder.finish()));
 
-            self.device.poll(wgpu::Maintain::Wait); // Wait for copy
+            self.device.poll(wgpu::PollType::Wait); // Wait for copy
 
             let debug_slice = debug_staging_buffer.slice(..);
             let (debug_sender, debug_receiver) = std::sync::mpsc::channel();
@@ -961,7 +963,7 @@ fn test_write() {
                 debug_sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::Maintain::Wait); // Wait for mapping
+            self.device.poll(wgpu::PollType::Wait); // Wait for mapping
 
             debug_receiver
                 .recv()
@@ -1059,7 +1061,7 @@ fn test_write() {
 
             // Submit final copy
             self.queue.submit(Some(final_encoder.finish()));
-            self.device.poll(wgpu::Maintain::Wait); // Wait for GPU
+            self.device.poll(wgpu::PollType::Wait); // Wait for GPU
 
             // Read back image results
             let buffer_slice = final_output_buffer.slice(..);
@@ -1068,7 +1070,7 @@ fn test_write() {
                 sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::Maintain::Wait); // Wait for mapping
+            self.device.poll(wgpu::PollType::Wait); // Wait for mapping
 
             receiver
                 .recv()
