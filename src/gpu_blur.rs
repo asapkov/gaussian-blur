@@ -33,6 +33,7 @@ struct ShaderParameters {
     _padding0: u32,
     sigma: f32,
     current_pass: u32, // Which pass we're on (0, 1, or 2 for box blur approximation)
+    blur_direction: u32, // 0 = horizontal, 1 = vertical  <-- ADD THIS
     _padding1: f32,
     _padding2: f32,
     _padding3: f32,
@@ -901,15 +902,136 @@ fn test_write() {
                 (&intermediate_view2, &output_view, box_radii[2]), // Pass 2 -> directly to output
             ];
 
-            let total_passes = 3;
-            for (pass_index, (input_view, output_view, radius)) in passes.iter().enumerate() {
-                println!(
-                    "\n--- Box Blur Pass {} of {} ---",
-                    pass_index + 1,
-                    total_passes
-                );
+            // === STEP 2: 3-Pass Box Blur (Gaussian Approximation) ===
+            println!("\n=== Step 2: 3-Pass Box Blur (Gaussian Approximation) ===");
 
-                println!("Box radius: {} (size: {} pixels)", radius, radius * 2 + 1);
+            // Calculate box radii for 3-pass approximation
+            let box_radii = self.calculate_box_radius();
+            println!(
+                "Using 3-pass box blur approximation for sigma={}",
+                self.sigma
+            );
+            for (i, &radius) in box_radii.iter().enumerate() {
+                println!(
+                    "  Pass {}: box radius = {} (size = {})",
+                    i + 1,
+                    radius,
+                    radius * 2 + 1
+                );
+            }
+
+            // We need more intermediate textures: 2 per pass (horizontal + vertical)
+            // Create additional textures
+            let intermediate_textures: Vec<wgpu::Texture> = (0..6)
+                .map(|i| {
+                    self.device.create_texture(&TextureDescriptor {
+                        label: Some(&format!("Intermediate Texture {}", i)),
+                        size: wgpu::Extent3d {
+                            width: width as u32,
+                            height: height as u32,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: TextureFormat::Rgba8Unorm,
+                        usage: intermediate_usage,
+                        view_formats: &[TextureFormat::Rgba8Unorm],
+                    })
+                })
+                .collect();
+
+            let intermediate_views: Vec<wgpu::TextureView> = intermediate_textures
+                .iter()
+                .map(|tex| tex.create_view(&wgpu::TextureViewDescriptor::default()))
+                .collect();
+
+            // Create output texture
+            let output_texture = self.device.create_texture(&TextureDescriptor {
+                label: Some("Output Texture"),
+                size: wgpu::Extent3d {
+                    width: width as u32,
+                    height: height as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[TextureFormat::Rgba8Unorm],
+            });
+
+            let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Define 6 passes (3 passes × 2 directions each)
+            // Format: (input_view, output_view, radius, pass_num, direction)
+            let passes = [
+                // Pass 0: Horizontal
+                (
+                    &input_view,
+                    &intermediate_views[0],
+                    box_radii[0],
+                    0u32,
+                    0u32,
+                ),
+                // Pass 1: Vertical
+                (
+                    &intermediate_views[0],
+                    &intermediate_views[1],
+                    box_radii[0],
+                    0u32,
+                    1u32,
+                ),
+                // Pass 2: Horizontal
+                (
+                    &intermediate_views[1],
+                    &intermediate_views[2],
+                    box_radii[1],
+                    1u32,
+                    0u32,
+                ),
+                // Pass 3: Vertical
+                (
+                    &intermediate_views[2],
+                    &intermediate_views[3],
+                    box_radii[1],
+                    1u32,
+                    1u32,
+                ),
+                // Pass 4: Horizontal
+                (
+                    &intermediate_views[3],
+                    &intermediate_views[4],
+                    box_radii[2],
+                    2u32,
+                    0u32,
+                ),
+                // Pass 5: Vertical (final output)
+                (
+                    &intermediate_views[4],
+                    &output_view,
+                    box_radii[2],
+                    2u32,
+                    1u32,
+                ),
+            ];
+
+            for (pass_index, (input_view, output_view, radius, pass_num, direction)) in
+                passes.iter().enumerate()
+            {
+                let is_horizontal = *direction == 0;
+                println!(
+                    "\n--- Box Blur Pass {} of 6 (Pass {} {}, radius={}) ---",
+                    pass_index + 1,
+                    pass_num + 1,
+                    if is_horizontal {
+                        "Horizontal"
+                    } else {
+                        "Vertical"
+                    },
+                    radius
+                );
 
                 // Update parameters for this pass
                 let params = ShaderParameters {
@@ -919,7 +1041,8 @@ fn test_write() {
                     blur_alpha: self.blur_alpha as u32,
                     _padding0: 0,
                     sigma: self.sigma,
-                    current_pass: pass_index as u32,
+                    current_pass: *pass_num,
+                    blur_direction: *direction, // <-- ADD THIS
                     _padding1: 0.0,
                     _padding2: 0.0,
                     _padding3: 0.0,
@@ -945,7 +1068,7 @@ fn test_write() {
                             usage: wgpu::BufferUsages::UNIFORM,
                         });
 
-                // Create bind group for this pass
+                // Create bind group
                 let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                     label: Some(&format!("Box Blur Bind Group Pass {}", pass_index)),
                     layout: &self.bind_group_layout,
@@ -985,13 +1108,9 @@ fn test_write() {
                     compute_pass.set_pipeline(&self.box_blur_pipeline);
                     compute_pass.set_bind_group(0, &bind_group, &[]);
 
-                    // Optimized dispatch for tiled processing
-                    let effective_width = (width as u32 + TILE_SIZE_X - 1) / TILE_SIZE_X;
-                    let effective_height = (height as u32 + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
-                    let dispatch_width =
-                        (effective_width + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-                    let dispatch_height =
-                        (effective_height + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
+                    // Simple dispatch - each thread handles one pixel
+                    let dispatch_width = (width as u32 + 7) / 8; // Round up to multiple of 8
+                    let dispatch_height = (height as u32 + 7) / 8;
 
                     println!(
                         "Dispatch: {}x{} workgroups",
@@ -1000,7 +1119,7 @@ fn test_write() {
                     compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
                 }
 
-                // Submit this pass and wait
+                // Submit and wait
                 self.queue.submit(Some(encoder.finish()));
                 let _ = self.device.poll(wgpu::PollType::Wait {
                     submission_index: None,
@@ -1010,7 +1129,7 @@ fn test_write() {
                 println!("Pass {} completed", pass_index + 1);
             }
 
-            println!("\nAll 3 blur passes completed. Output is ready in output_texture.");
+            println!("\nAll 6 blur passes (3×2 separable) completed.");
 
             // === READ DEBUG BUFFER ===
             println!("\n=== Step 3: Debug Analysis ===");
