@@ -4,9 +4,8 @@
 use wgpu::{
     util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, ComputePipeline, ComputePipelineDescriptor, Device,
-    DeviceDescriptor, Instance, Limits, PipelineLayout, PipelineLayoutDescriptor, Queue,
-    ShaderModuleDescriptor, ShaderSource, StorageTextureAccess, TextureDescriptor, TextureFormat,
-    TextureViewDimension,
+    Instance, Limits, PipelineLayout, Queue, ShaderModuleDescriptor, ShaderSource,
+    StorageTextureAccess, TextureDescriptor, TextureFormat, TextureViewDimension,
 };
 
 #[cfg(feature = "gpu")]
@@ -191,17 +190,14 @@ impl GpuGaussianBlur {
             println!("Requesting device with adapter's maximum limits...");
 
             let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
-                .request_device(
-                    &wgpu::DeviceDescriptor {
-                        label: Some("Gaussian Blur Device"),
-                        required_features: wgpu::Features::empty(),
-                        required_limits: adapter.limits(),
-                        memory_hints: wgpu::MemoryHints::Performance,
-                        experimental_features: Default::default(), // Required in v22+
-                        trace: None,                               // Required in v22+
-                    },
-                    None,
-                )
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("Gaussian Blur Device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                    experimental_features: Default::default(), // Required in v22+
+                    trace: wgpu::Trace::Off,                   // Required in v22+
+                })
                 .await
                 .expect("Failed to create device");
 
@@ -622,8 +618,9 @@ fn test_write() {
                     label: Some("Test Write Pipeline"),
                     layout: Some(&self.pipeline_layout),
                     module: &test_shader,
-                    entry_point: "test_write",
+                    entry_point: Some("test_write"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    cache: None,
                 });
 
             // Create a temporary bind group for test
@@ -720,7 +717,10 @@ fn test_write() {
 
             // Submit and wait
             self.queue.submit(Some(test_encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait); // CRITICAL: Wait for GPU
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            }); // CRITICAL: Wait for GPU
 
             // Read back test results
             let buffer_slice = test_output_buffer.slice(..);
@@ -729,7 +729,10 @@ fn test_write() {
                 sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::PollType::Wait); // CRITICAL: Wait for mapping
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            }); // CRITICAL: Wait for mapping
 
             let test_result = match receiver.recv() {
                 Ok(Ok(())) => {
@@ -809,7 +812,10 @@ fn test_write() {
                         label: Some("Clear Encoder"),
                     });
             self.queue.submit(Some(clear_encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait);
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
 
             // === STEP 2: Multiple Box Blur Passes ===
             println!("\n=== Step 2: Multiple Box Blur Passes (approximates Gaussian) ===");
@@ -926,7 +932,10 @@ fn test_write() {
 
                 // Submit this pass and wait
                 self.queue.submit(Some(encoder.finish()));
-                self.device.poll(wgpu::PollType::Wait); // Wait for GPU to finish
+                self.device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                }); // Wait for GPU to finish
 
                 println!("Pass {} completed", pass_index + 1);
             }
@@ -955,7 +964,10 @@ fn test_write() {
             );
             self.queue.submit(Some(debug_encoder.finish()));
 
-            self.device.poll(wgpu::PollType::Wait); // Wait for copy
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            }); // Wait for copy
 
             let debug_slice = debug_staging_buffer.slice(..);
             let (debug_sender, debug_receiver) = std::sync::mpsc::channel();
@@ -963,7 +975,10 @@ fn test_write() {
                 debug_sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::PollType::Wait); // Wait for mapping
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            }); // Wait for mapping
 
             debug_receiver
                 .recv()
@@ -1061,7 +1076,10 @@ fn test_write() {
 
             // Submit final copy
             self.queue.submit(Some(final_encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait); // Wait for GPU
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            }); // Wait for GPU
 
             // Read back image results
             let buffer_slice = final_output_buffer.slice(..);
@@ -1070,7 +1088,10 @@ fn test_write() {
                 sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::PollType::Wait); // Wait for mapping
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            }); // Wait for mapping
 
             receiver
                 .recv()
