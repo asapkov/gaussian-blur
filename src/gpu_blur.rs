@@ -1,10 +1,10 @@
-//! GPU-accelerated Gaussian Blur using wgpu with multi-strategy approach
+//! GPU-accelerated Gaussian Blur using wgpu with optimized multi-shader approach
 
 #[cfg(feature = "gpu")]
 use wgpu::{
     util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, ComputePipeline, ComputePipelineDescriptor, Device,
-    Instance, Limits, PipelineLayout, Queue, ShaderModuleDescriptor, ShaderSource,
+    BindGroupLayoutEntry, BindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor,
+    Device, Instance, Limits, PipelineLayout, Queue, ShaderModuleDescriptor, ShaderSource,
     StorageTextureAccess, TextureDescriptor, TextureFormat, TextureViewDimension,
 };
 
@@ -14,8 +14,7 @@ use bytemuck;
 use crate::Pixel;
 
 // Constants for optimized work distribution
-const WORKGROUP_SIZE_X: u32 = 16;
-const WORKGROUP_SIZE_Y: u32 = 16;
+const WORKGROUP_SIZE: u32 = 256; // Optimized for shared memory tiling
 const DEBUG_BUFFER_SIZE: usize = 1024;
 const BOX_BLUR_PASSES: u32 = 3;
 
@@ -24,32 +23,90 @@ const GAUSSIAN_THRESHOLD: f32 = 2.0;
 const DOWNSAMPLE_THRESHOLD: f32 = 32.0;
 const LARGE_SIGMA_THRESHOLD: f32 = 100.0;
 
-// Shader parameters struct - must match the WGSL struct layout
+// Maximum Gaussian kernel size (256 vec4s = 1024 weights)
+const MAX_GAUSSIAN_KERNEL_SIZE: usize = 1024;
+
+// Shader parameters structs
 #[cfg(feature = "gpu")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct ShaderParameters {
+struct DownsampleParams {
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+    _padding: [u32; 4],
+}
+
+#[cfg(feature = "gpu")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct UpsampleParams {
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+    _padding: [u32; 4],
+}
+
+#[cfg(feature = "gpu")]
+#[repr(C, align(16))] // Align to 16 bytes
+#[derive(Debug, Clone, Copy)]
+struct BoxBlurParams {
     width: u32,
     height: u32,
     radius: u32,
     blur_alpha: u32,
-    operation_mode: u32, // 0 = box blur, 1 = downsample, 2 = upsample, 3 = gaussian blur
-    sigma: f32,
-    current_pass: u32, // Which pass we're on (for multi-pass operations)
-    src_width: u32,    // Source texture width (for downsample/upsample)
-    src_height: u32,   // Source texture height
-    dst_width: u32,    // Destination texture width
-    dst_height: u32,   // Destination texture height
-    _padding2: f32,
-    _padding3: f32,
-    _padding4: f32,
+    direction: u32,
+    _padding: [u32; 7], // Increase from 3 to 7 to reach 48 bytes total
 }
 
-// Manually implement Pod and Zeroable for ShaderParameters
 #[cfg(feature = "gpu")]
-unsafe impl bytemuck::Pod for ShaderParameters {}
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct GaussianBlurParams {
+    width: u32,
+    height: u32,
+    radius: u32,
+    blur_alpha: u32,
+    direction: u32,
+    sigma: f32,
+    _padding: [u32; 2],
+}
+
+// Gaussian weights struct (256 vec4s = 1024 weights)
 #[cfg(feature = "gpu")]
-unsafe impl bytemuck::Zeroable for ShaderParameters {}
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct GaussianWeights {
+    weights: [[f32; 4]; 256], // Packed as vec4<f32> for 16-byte alignment
+}
+
+// Implement Pod/Zeroable for all parameter structs
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Pod for DownsampleParams {}
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Zeroable for DownsampleParams {}
+
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Pod for UpsampleParams {}
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Zeroable for UpsampleParams {}
+
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Pod for BoxBlurParams {}
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Zeroable for BoxBlurParams {}
+
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Pod for GaussianBlurParams {}
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Zeroable for GaussianBlurParams {}
+
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Pod for GaussianWeights {}
+#[cfg(feature = "gpu")]
+unsafe impl bytemuck::Zeroable for GaussianWeights {}
 
 /// Blur strategy based on sigma value
 enum BlurStrategy {
@@ -61,18 +118,33 @@ enum BlurStrategy {
     },
 }
 
-/// GPU Gaussian Blur processor with multi-strategy approach
+/// GPU Gaussian Blur processor with optimized multi-shader approach
 pub struct GpuGaussianBlur {
     #[cfg(feature = "gpu")]
     device: Device,
     #[cfg(feature = "gpu")]
     queue: Queue,
+
+    // Separate pipelines for each operation
     #[cfg(feature = "gpu")]
-    compute_pipeline: ComputePipeline,
+    downsample_pipeline: ComputePipeline,
     #[cfg(feature = "gpu")]
-    pipeline_layout: PipelineLayout,
+    upsample_pipeline: ComputePipeline,
     #[cfg(feature = "gpu")]
-    bind_group_layout: wgpu::BindGroupLayout,
+    box_blur_pipeline: ComputePipeline,
+    #[cfg(feature = "gpu")]
+    gaussian_blur_pipeline: ComputePipeline,
+
+    // Bind group layouts
+    #[cfg(feature = "gpu")]
+    downsample_bind_group_layout: wgpu::BindGroupLayout,
+    #[cfg(feature = "gpu")]
+    upsample_bind_group_layout: wgpu::BindGroupLayout,
+    #[cfg(feature = "gpu")]
+    box_blur_bind_group_layout: wgpu::BindGroupLayout,
+    #[cfg(feature = "gpu")]
+    gaussian_blur_bind_group_layout: wgpu::BindGroupLayout,
+
     sigma: f32,
     radius: i32,
     blur_alpha: bool,
@@ -97,44 +169,20 @@ impl GpuGaussianBlur {
             // Initialize wgpu
             let instance = Instance::default();
 
-            // Try to find integrated GPU first
-            println!("Looking for integrated GPU...");
-            let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
-            println!("Found {} adapters", adapters.len());
-
-            // First try to find integrated GPU
-            let mut found_adapter = None;
-
-            for adapter in adapters.iter() {
-                let info = adapter.get_info();
-                println!("Found adapter: {} ({:?})", info.name, info.device_type);
-
-                if info.device_type != wgpu::DeviceType::IntegratedGpu {
-                    println!("Using Nvidia GPU: {}", info.name);
-                    found_adapter = Some(adapter);
-                    break;
-                }
-            }
-
-            let adapter: wgpu::Adapter = if let Some(ref adp) = found_adapter {
-                (*adp).clone()
-            } else {
-                println!("No integrated GPU found, requesting default adapter");
-                instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::LowPower,
-                        force_fallback_adapter: false,
-                        compatible_surface: None,
-                    })
-                    .await
-                    .expect("Failed to find a suitable GPU adapter")
-            };
+            // Find adapter
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .await
+                .expect("Failed to find a suitable GPU adapter");
 
             let info = adapter.get_info();
             println!("Selected adapter: {} ({:?})", info.name, info.device_type);
 
-            // Request the maximum limits the adapter supports
-            let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
+            let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("Gaussian Blur Device"),
                     required_features: wgpu::Features::empty(),
@@ -146,82 +194,250 @@ impl GpuGaussianBlur {
                 .await
                 .expect("Failed to create device");
 
-            // Load shader
-            let shader_source = include_str!("shaders/gaussian_blur_shared.wgsl");
-            println!(
-                "Shader source loaded, length: {} bytes",
-                shader_source.len()
-            );
-
-            let shader = device.create_shader_module(ShaderModuleDescriptor {
-                label: Some("Gaussian Blur Multi-Strategy Shader"),
-                source: ShaderSource::Wgsl(shader_source.into()),
+            // Load and compile all shaders
+            let downsample_shader = device.create_shader_module(ShaderModuleDescriptor {
+                label: Some("Downsample Shader"),
+                source: ShaderSource::Wgsl(include_str!("shaders/downsample.wgsl").into()),
             });
 
-            // Create bind group layout
-            let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Blur Bind Group Layout"),
-                entries: &[
-                    // Input texture (texture_2d<f32> for reading) - binding 0
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // Output texture (storage, write-only, rgba8unorm) - binding 1
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: BindingType::StorageTexture {
-                            access: StorageTextureAccess::WriteOnly,
-                            format: TextureFormat::Rgba8Unorm,
-                            view_dimension: TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                    // Parameters buffer - binding 2
-                    BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // Debug buffer (storage, read-write) - binding 3
-                    BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
+            let upsample_shader = device.create_shader_module(ShaderModuleDescriptor {
+                label: Some("Upsample Shader"),
+                source: ShaderSource::Wgsl(include_str!("shaders/upsample.wgsl").into()),
             });
 
-            // Create pipeline layout
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Blur Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                immediate_size: 0,
+            let box_blur_shader = device.create_shader_module(ShaderModuleDescriptor {
+                label: Some("Box Blur Shader"),
+                source: ShaderSource::Wgsl(include_str!("shaders/box_blur_separable.wgsl").into()),
             });
 
-            // Create compute pipeline
-            let compute_pipeline =
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("Blur Pipeline"),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
+            let gaussian_blur_shader = device.create_shader_module(ShaderModuleDescriptor {
+                label: Some("Gaussian Blur Shader"),
+                source: ShaderSource::Wgsl(
+                    include_str!("shaders/gaussian_blur_separable.wgsl").into(),
+                ),
+            });
+
+            // Create bind group layouts for each shader
+            let downsample_bind_group_layout =
+                device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Downsample Bind Group Layout"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::StorageTexture {
+                                access: StorageTextureAccess::WriteOnly,
+                                format: TextureFormat::Rgba8Unorm,
+                                view_dimension: TextureViewDimension::D2,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+            let upsample_bind_group_layout =
+                device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Upsample Bind Group Layout"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::StorageTexture {
+                                access: StorageTextureAccess::WriteOnly,
+                                format: TextureFormat::Rgba8Unorm,
+                                view_dimension: TextureViewDimension::D2,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+            let box_blur_bind_group_layout =
+                device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Box Blur Bind Group Layout"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::StorageTexture {
+                                access: StorageTextureAccess::WriteOnly,
+                                format: TextureFormat::Rgba8Unorm,
+                                view_dimension: TextureViewDimension::D2,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+            let gaussian_blur_bind_group_layout =
+                device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Gaussian Blur Bind Group Layout"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::StorageTexture {
+                                access: StorageTextureAccess::WriteOnly,
+                                format: TextureFormat::Rgba8Unorm,
+                                view_dimension: TextureViewDimension::D2,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+            // Create pipeline layouts
+            let downsample_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Downsample Pipeline Layout"),
+                    bind_group_layouts: &[&downsample_bind_group_layout],
+                    immediate_size: 0,
+                });
+
+            let upsample_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Upsample Pipeline Layout"),
+                    bind_group_layouts: &[&upsample_bind_group_layout],
+                    immediate_size: 0,
+                });
+
+            let box_blur_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Box Blur Pipeline Layout"),
+                    bind_group_layouts: &[&box_blur_bind_group_layout],
+                    immediate_size: 0,
+                });
+
+            let gaussian_blur_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Gaussian Blur Pipeline Layout"),
+                    bind_group_layouts: &[&gaussian_blur_bind_group_layout],
+                    immediate_size: 0,
+                });
+
+            // Create compute pipelines
+            let downsample_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some("Downsample Pipeline"),
+                layout: Some(&downsample_pipeline_layout),
+                module: &downsample_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+            let upsample_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some("Upsample Pipeline"),
+                layout: Some(&upsample_pipeline_layout),
+                module: &upsample_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+            let box_blur_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some("Box Blur Pipeline"),
+                layout: Some(&box_blur_pipeline_layout),
+                module: &box_blur_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+            let gaussian_blur_pipeline =
+                device.create_compute_pipeline(&ComputePipelineDescriptor {
+                    label: Some("Gaussian Blur Pipeline"),
+                    layout: Some(&gaussian_blur_pipeline_layout),
+                    module: &gaussian_blur_shader,
                     entry_point: Some("main"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     cache: None,
@@ -230,9 +446,14 @@ impl GpuGaussianBlur {
             Ok(Self {
                 device,
                 queue,
-                compute_pipeline,
-                pipeline_layout,
-                bind_group_layout,
+                downsample_pipeline,
+                upsample_pipeline,
+                box_blur_pipeline,
+                gaussian_blur_pipeline,
+                downsample_bind_group_layout,
+                upsample_bind_group_layout,
+                box_blur_bind_group_layout,
+                gaussian_blur_bind_group_layout,
                 sigma,
                 radius,
                 blur_alpha,
@@ -325,6 +546,47 @@ impl GpuGaussianBlur {
         println!();
 
         sizes
+    }
+
+    /// Precompute Gaussian kernel weights packed into vec4<f32> arrays
+    #[cfg(feature = "gpu")]
+    fn precompute_gaussian_weights(&self, radius: u32, sigma: f32) -> GaussianWeights {
+        let kernel_size = (2 * radius + 1) as usize;
+        let mut raw_weights = Vec::with_capacity(kernel_size);
+        let mut weight_sum = 0.0;
+
+        // Compute raw weights
+        for i in 0..kernel_size {
+            let x = i as i32 - radius as i32;
+            let weight = (-(x * x) as f32 / (2.0 * sigma * sigma)).exp();
+            raw_weights.push(weight);
+            weight_sum += weight;
+        }
+
+        // Normalize weights
+        for weight in raw_weights.iter_mut() {
+            *weight /= weight_sum;
+        }
+
+        // Pack into vec4 arrays (4 weights per vec4)
+        let mut weights_data = GaussianWeights {
+            weights: [[0.0; 4]; 256],
+        };
+
+        let vec4_count = (kernel_size + 3) / 4;
+
+        for i in 0..vec4_count {
+            let base_idx = i * 4;
+
+            for j in 0..4 {
+                let idx = base_idx + j;
+                if idx < kernel_size {
+                    weights_data.weights[i][j] = raw_weights[idx];
+                }
+            }
+        }
+
+        weights_data
     }
 
     /// Apply blur to an image and return as 2D pixel array
@@ -451,20 +713,23 @@ impl GpuGaussianBlur {
             let input_view = input_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Execute selected strategy
-            let (final_view, final_texture) = match &self.strategy {
-                BlurStrategy::Gaussian => self.apply_gaussian_blur(&input_view, width, height)?,
-                BlurStrategy::Box3Pass => self.apply_box_blur_3pass(&input_view, width, height)?,
-                BlurStrategy::Downsample {
-                    factor,
-                    adjusted_sigma,
-                } => self.apply_downsample_blur_upsample(
-                    &input_view,
-                    width,
-                    height,
-                    *factor,
-                    *adjusted_sigma,
-                )?,
-            };
+            let final_texture = self.device.create_texture(&TextureDescriptor {
+                label: Some("Final Output Texture"),
+                size: wgpu::Extent3d {
+                    width: width as u32,
+                    height: height as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TextureFormat::Rgba8Unorm,
+                // CRITICAL: Add COPY_SRC
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[TextureFormat::Rgba8Unorm],
+            });
 
             // Copy result to CPU
             println!("\n=== Copying results to CPU ===");
@@ -569,9 +834,8 @@ impl GpuGaussianBlur {
                 }
             }
 
-            // Cleanup
+            // Cleanup - data is automatically unmapped when dropped
             drop(data);
-            // final_output_buffer.unmap();
 
             println!("Total GPU time: {:?}", total_start.elapsed());
 
@@ -596,6 +860,18 @@ impl GpuGaussianBlur {
         height: usize,
     ) -> Result<(wgpu::TextureView, wgpu::Texture), String> {
         println!("\n=== Applying True Gaussian Blur ===");
+
+        // Precompute Gaussian kernel weights
+        let weights_data = self.precompute_gaussian_weights(self.radius as u32, self.sigma);
+        println!("Gaussian kernel size: {}", (2 * self.radius as u32 + 1));
+
+        let weights_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Gaussian Weights Buffer"),
+                contents: bytemuck::cast_slice(&[weights_data]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         // Create intermediate texture for vertical pass
         let intermediate_texture = self.device.create_texture(&TextureDescriptor {
@@ -634,31 +910,16 @@ impl GpuGaussianBlur {
 
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create debug buffer
-        let debug_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Buffer"),
-            size: (DEBUG_BUFFER_SIZE * std::mem::size_of::<f32>()) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
         // Horizontal pass
         println!("Horizontal pass...");
-        let horiz_params = ShaderParameters {
+        let horiz_params = GaussianBlurParams {
             width: width as u32,
             height: height as u32,
             radius: self.radius as u32,
             blur_alpha: self.blur_alpha as u32,
-            operation_mode: 3, // Gaussian blur mode
+            direction: 0, // Horizontal
             sigma: self.sigma,
-            current_pass: 0, // Horizontal
-            src_width: width as u32,
-            src_height: height as u32,
-            dst_width: width as u32,
-            dst_height: height as u32,
-            _padding2: 0.0,
-            _padding3: 0.0,
-            _padding4: 0.0,
+            _padding: [0; 2],
         };
 
         let horiz_params_buffer =
@@ -671,7 +932,7 @@ impl GpuGaussianBlur {
 
         let horiz_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Horizontal Gaussian Bind Group"),
-            layout: &self.bind_group_layout,
+            layout: &self.gaussian_blur_bind_group_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -687,7 +948,7 @@ impl GpuGaussianBlur {
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: debug_buffer.as_entire_binding(),
+                    resource: weights_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -704,12 +965,13 @@ impl GpuGaussianBlur {
                 timestamp_writes: None,
             });
 
-            compute_pass.set_pipeline(&self.compute_pipeline);
+            compute_pass.set_pipeline(&self.gaussian_blur_pipeline);
             compute_pass.set_bind_group(0, &horiz_bind_group, &[]);
 
-            let dispatch_width = (width as u32 + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-            let dispatch_height = (height as u32 + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
-            compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
+            // Dispatch one workgroup per row for horizontal blur
+            let dispatch_x = (width as u32 + 255) / 256;
+            let dispatch_y = height as u32;
+            compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
         self.queue.submit(Some(horiz_encoder.finish()));
@@ -720,21 +982,14 @@ impl GpuGaussianBlur {
 
         // Vertical pass
         println!("Vertical pass...");
-        let vert_params = ShaderParameters {
+        let vert_params = GaussianBlurParams {
             width: width as u32,
             height: height as u32,
             radius: self.radius as u32,
             blur_alpha: self.blur_alpha as u32,
-            operation_mode: 3, // Gaussian blur mode
+            direction: 1, // Vertical
             sigma: self.sigma,
-            current_pass: 1, // Vertical
-            src_width: width as u32,
-            src_height: height as u32,
-            dst_width: width as u32,
-            dst_height: height as u32,
-            _padding2: 0.0,
-            _padding3: 0.0,
-            _padding4: 0.0,
+            _padding: [0; 2],
         };
 
         let vert_params_buffer =
@@ -747,7 +1002,7 @@ impl GpuGaussianBlur {
 
         let vert_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Vertical Gaussian Bind Group"),
-            layout: &self.bind_group_layout,
+            layout: &self.gaussian_blur_bind_group_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -763,7 +1018,7 @@ impl GpuGaussianBlur {
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: debug_buffer.as_entire_binding(),
+                    resource: weights_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -780,12 +1035,13 @@ impl GpuGaussianBlur {
                 timestamp_writes: None,
             });
 
-            compute_pass.set_pipeline(&self.compute_pipeline);
+            compute_pass.set_pipeline(&self.gaussian_blur_pipeline);
             compute_pass.set_bind_group(0, &vert_bind_group, &[]);
 
-            let dispatch_width = (width as u32 + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-            let dispatch_height = (height as u32 + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
-            compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
+            // Dispatch one workgroup per column for vertical blur
+            let dispatch_x = width as u32;
+            let dispatch_y = (height as u32 + 255) / 256;
+            compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
         self.queue.submit(Some(vert_encoder.finish()));
@@ -866,44 +1122,26 @@ impl GpuGaussianBlur {
         let view2 = texture2.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create debug buffer
-        let debug_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Box Blur Debug Buffer"),
-            size: (DEBUG_BUFFER_SIZE * std::mem::size_of::<f32>()) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
         // Apply 6 blur passes (3 passes × 2 directions)
         let blur_passes = [
-            (input_view, &view1, box_radii[0], 0u32, 0u32),
-            (&view1, &view2, box_radii[0], 0u32, 1u32),
-            (&view2, &view1, box_radii[1], 1u32, 0u32),
-            (&view1, &view2, box_radii[1], 1u32, 1u32),
-            (&view2, &view1, box_radii[2], 2u32, 0u32),
-            (&view1, &output_view, box_radii[2], 2u32, 1u32),
+            (input_view, &view1, box_radii[0], 0u32),
+            (&view1, &view2, box_radii[0], 1u32),
+            (&view2, &view1, box_radii[1], 0u32),
+            (&view1, &view2, box_radii[1], 1u32),
+            (&view2, &view1, box_radii[2], 0u32),
+            (&view1, &output_view, box_radii[2], 1u32),
         ];
 
-        for (i, (input_view, output_view, radius, pass_num, direction)) in
-            blur_passes.iter().enumerate()
-        {
+        for (i, (input_view, output_view, radius, direction)) in blur_passes.iter().enumerate() {
             println!("--- Box Blur Pass {} of 6 ---", i + 1);
 
-            let params = ShaderParameters {
+            let params = BoxBlurParams {
                 width: width as u32,
                 height: height as u32,
                 radius: *radius,
                 blur_alpha: self.blur_alpha as u32,
-                operation_mode: 0, // Box blur mode
-                sigma: self.sigma,
-                current_pass: *direction, // 0 = horizontal, 1 = vertical
-                src_width: width as u32,
-                src_height: height as u32,
-                dst_width: width as u32,
-                dst_height: height as u32,
-                _padding2: 0.0,
-                _padding3: 0.0,
-                _padding4: 0.0,
+                direction: *direction,
+                _padding: [0; 7],
             };
 
             let params_buffer = self
@@ -916,7 +1154,7 @@ impl GpuGaussianBlur {
 
             let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                 label: Some(&format!("Box Blur Bind Group {}", i + 1)),
-                layout: &self.bind_group_layout,
+                layout: &self.box_blur_bind_group_layout,
                 entries: &[
                     BindGroupEntry {
                         binding: 0,
@@ -929,10 +1167,6 @@ impl GpuGaussianBlur {
                     BindGroupEntry {
                         binding: 2,
                         resource: params_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        resource: debug_buffer.as_entire_binding(),
                     },
                 ],
             });
@@ -949,12 +1183,21 @@ impl GpuGaussianBlur {
                     timestamp_writes: None,
                 });
 
-                compute_pass.set_pipeline(&self.compute_pipeline);
+                compute_pass.set_pipeline(&self.box_blur_pipeline);
                 compute_pass.set_bind_group(0, &bind_group, &[]);
 
-                let dispatch_width = (width as u32 + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-                let dispatch_height = (height as u32 + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
-                compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
+                // Dispatch based on direction
+                if *direction == 0 {
+                    // Horizontal blur: one workgroup per row
+                    let dispatch_x = (width as u32 + 255) / 256;
+                    let dispatch_y = height as u32;
+                    compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+                } else {
+                    // Vertical blur: one workgroup per column
+                    let dispatch_x = width as u32;
+                    let dispatch_y = (height as u32 + 255) / 256;
+                    compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+                }
             }
 
             self.queue.submit(Some(encoder.finish()));
@@ -1014,30 +1257,13 @@ impl GpuGaussianBlur {
         let downsampled_view =
             downsampled_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create debug buffer
-        let debug_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Downsample Debug Buffer"),
-            size: (DEBUG_BUFFER_SIZE * std::mem::size_of::<f32>()) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
         // Downsample parameters
-        let down_params = ShaderParameters {
-            width: down_width,
-            height: down_height,
-            radius: 0,
-            blur_alpha: self.blur_alpha as u32,
-            operation_mode: 1, // Downsample mode
-            sigma: 0.0,
-            current_pass: 0,
+        let down_params = DownsampleParams {
             src_width: width as u32,
             src_height: height as u32,
             dst_width: down_width,
             dst_height: down_height,
-            _padding2: 0.0,
-            _padding3: 0.0,
-            _padding4: 0.0,
+            _padding: [0; 4],
         };
 
         let down_params_buffer =
@@ -1050,7 +1276,7 @@ impl GpuGaussianBlur {
 
         let down_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Downsample Bind Group"),
-            layout: &self.bind_group_layout,
+            layout: &self.downsample_bind_group_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -1063,10 +1289,6 @@ impl GpuGaussianBlur {
                 BindGroupEntry {
                     binding: 2,
                     resource: down_params_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: debug_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1083,12 +1305,13 @@ impl GpuGaussianBlur {
                 timestamp_writes: None,
             });
 
-            compute_pass.set_pipeline(&self.compute_pipeline);
+            compute_pass.set_pipeline(&self.downsample_pipeline);
             compute_pass.set_bind_group(0, &down_bind_group, &[]);
 
-            let dispatch_width = (down_width + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-            let dispatch_height = (down_height + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
-            compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
+            // Dispatch one workgroup per 8x8 block of downsampled image
+            let dispatch_x = (down_width + 7) / 8;
+            let dispatch_y = (down_height + 7) / 8;
+            compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
         self.queue.submit(Some(down_encoder.finish()));
@@ -1102,14 +1325,7 @@ impl GpuGaussianBlur {
         // === STEP 2: Apply blur on downsampled image ===
         println!("\n=== Step 2: Applying blur on downsampled image ===");
 
-        // Calculate box sizes for 3-pass approximation on downsampled image
-        let box_sizes = Self::boxes_for_gauss_3pass(adjusted_sigma);
-        let box_radii = box_sizes.map(|size| ((size as i32 - 1) / 2).max(0) as u32);
-
-        println!("Adjusted sigma: {:.2}", adjusted_sigma);
-        println!("Box radii: {:?}", box_radii);
-
-        // Create intermediate textures for blur passes
+        // Create intermediate textures for blur
         let intermediate_texture1 = self.device.create_texture(&TextureDescriptor {
             label: Some("Intermediate Texture 1 (Downsampled)"),
             size: wgpu::Extent3d {
@@ -1163,44 +1379,33 @@ impl GpuGaussianBlur {
         let blurred_down_view =
             blurred_down_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create debug buffer for blur passes
-        let debug_buffer2 = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Downsampled Blur Debug Buffer"),
-            size: (DEBUG_BUFFER_SIZE * std::mem::size_of::<f32>()) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
+        // Calculate box sizes for adjusted sigma
+        let box_sizes = Self::boxes_for_gauss_3pass(adjusted_sigma);
+        let box_radii = box_sizes.map(|size| ((size as i32 - 1) / 2).max(0) as u32);
+
+        println!("Adjusted sigma: {:.2}", adjusted_sigma);
+        println!("Box radii: {:?}", box_radii);
 
         // Apply 6 blur passes (3 passes × 2 directions) on downsampled image
         let blur_passes = [
-            (&downsampled_view, &view1, box_radii[0], 0u32, 0u32),
-            (&view1, &view2, box_radii[0], 0u32, 1u32),
-            (&view2, &view1, box_radii[1], 1u32, 0u32),
-            (&view1, &view2, box_radii[1], 1u32, 1u32),
-            (&view2, &view1, box_radii[2], 2u32, 0u32),
-            (&view1, &blurred_down_view, box_radii[2], 2u32, 1u32),
+            (&downsampled_view, &view1, box_radii[0], 0u32),
+            (&view1, &view2, box_radii[0], 1u32),
+            (&view2, &view1, box_radii[1], 0u32),
+            (&view1, &view2, box_radii[1], 1u32),
+            (&view2, &view1, box_radii[2], 0u32),
+            (&view1, &blurred_down_view, box_radii[2], 1u32),
         ];
 
-        for (i, (input_view, output_view, radius, pass_num, direction)) in
-            blur_passes.iter().enumerate()
-        {
+        for (i, (input_view, output_view, radius, direction)) in blur_passes.iter().enumerate() {
             println!("--- Box Blur Pass {} of 6 (Downsampled) ---", i + 1);
 
-            let params = ShaderParameters {
+            let params = BoxBlurParams {
                 width: down_width,
                 height: down_height,
                 radius: *radius,
                 blur_alpha: self.blur_alpha as u32,
-                operation_mode: 0, // Box blur mode
-                sigma: adjusted_sigma,
-                current_pass: *direction, // 0 = horizontal, 1 = vertical
-                src_width: down_width,
-                src_height: down_height,
-                dst_width: down_width,
-                dst_height: down_height,
-                _padding2: 0.0,
-                _padding3: 0.0,
-                _padding4: 0.0,
+                direction: *direction,
+                _padding: [0; 7],
             };
 
             let params_buffer = self
@@ -1213,7 +1418,7 @@ impl GpuGaussianBlur {
 
             let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                 label: Some(&format!("Downsampled Box Blur Bind Group {}", i + 1)),
-                layout: &self.bind_group_layout,
+                layout: &self.box_blur_bind_group_layout,
                 entries: &[
                     BindGroupEntry {
                         binding: 0,
@@ -1226,10 +1431,6 @@ impl GpuGaussianBlur {
                     BindGroupEntry {
                         binding: 2,
                         resource: params_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        resource: debug_buffer2.as_entire_binding(),
                     },
                 ],
             });
@@ -1246,12 +1447,21 @@ impl GpuGaussianBlur {
                     timestamp_writes: None,
                 });
 
-                compute_pass.set_pipeline(&self.compute_pipeline);
+                compute_pass.set_pipeline(&self.box_blur_pipeline);
                 compute_pass.set_bind_group(0, &bind_group, &[]);
 
-                let dispatch_width = (down_width + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-                let dispatch_height = (down_height + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
-                compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
+                // Dispatch based on direction
+                if *direction == 0 {
+                    // Horizontal blur
+                    let dispatch_x = (down_width + 255) / 256;
+                    let dispatch_y = down_height;
+                    compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+                } else {
+                    // Vertical blur
+                    let dispatch_x = down_width;
+                    let dispatch_y = (down_height + 255) / 256;
+                    compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+                }
             }
 
             self.queue.submit(Some(encoder.finish()));
@@ -1287,21 +1497,12 @@ impl GpuGaussianBlur {
 
         let final_view = final_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let up_params = ShaderParameters {
-            width: width as u32,
-            height: height as u32,
-            radius: 0,
-            blur_alpha: self.blur_alpha as u32,
-            operation_mode: 2, // Upsample mode
-            sigma: 0.0,
-            current_pass: 0,
+        let up_params = UpsampleParams {
             src_width: down_width,
             src_height: down_height,
             dst_width: width as u32,
             dst_height: height as u32,
-            _padding2: 0.0,
-            _padding3: 0.0,
-            _padding4: 0.0,
+            _padding: [0; 4],
         };
 
         let up_params_buffer = self
@@ -1314,7 +1515,7 @@ impl GpuGaussianBlur {
 
         let up_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Upsample Bind Group"),
-            layout: &self.bind_group_layout,
+            layout: &self.upsample_bind_group_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -1327,10 +1528,6 @@ impl GpuGaussianBlur {
                 BindGroupEntry {
                     binding: 2,
                     resource: up_params_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: debug_buffer2.as_entire_binding(),
                 },
             ],
         });
@@ -1347,12 +1544,13 @@ impl GpuGaussianBlur {
                 timestamp_writes: None,
             });
 
-            compute_pass.set_pipeline(&self.compute_pipeline);
+            compute_pass.set_pipeline(&self.upsample_pipeline);
             compute_pass.set_bind_group(0, &up_bind_group, &[]);
 
-            let dispatch_width = (width as u32 + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-            let dispatch_height = (height as u32 + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
-            compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
+            // Dispatch one workgroup per 8x8 block of output image
+            let dispatch_x = (width as u32 + 7) / 8;
+            let dispatch_y = (height as u32 + 7) / 8;
+            compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
         self.queue.submit(Some(up_encoder.finish()));
@@ -1363,102 +1561,6 @@ impl GpuGaussianBlur {
 
         println!("Upsample completed");
 
-        // Verify first pixel
-        let debug_bytes = self.read_texture_to_cpu(&final_texture, 1, 1)?;
-        if debug_bytes.len() >= 4 {
-            println!(
-                "First pixel after upsample: R={}, G={}, B={}, A={}",
-                debug_bytes[0], debug_bytes[1], debug_bytes[2], debug_bytes[3]
-            );
-        }
-
         Ok((final_view, final_texture))
-    }
-
-    /// Helper function to read texture data for debugging
-    #[cfg(feature = "gpu")]
-    fn read_texture_to_cpu(
-        &self,
-        texture: &wgpu::Texture,
-        width: usize,
-        height: usize,
-    ) -> Result<Vec<u8>, String> {
-        let alignment = 256;
-        let bytes_per_row_unaligned = 4 * width as u32;
-        let bytes_per_row_aligned =
-            ((bytes_per_row_unaligned + alignment - 1) / alignment) * alignment;
-
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Read Buffer"),
-            size: (bytes_per_row_aligned as u64 * height as u64) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Debug Read Encoder"),
-            });
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_row_aligned),
-                    rows_per_image: Some(height as u32),
-                },
-            },
-            wgpu::Extent3d {
-                width: width as u32,
-                height: height as u32,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        self.queue.submit(Some(encoder.finish()));
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
-
-        let buffer_slice = buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
-        });
-
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
-
-        receiver
-            .recv()
-            .map_err(|e| format!("Failed to receive buffer: {}", e))?
-            .map_err(|e| format!("Failed to map buffer: {}", e))?;
-
-        let data = buffer_slice.get_mapped_range();
-        let mut result_bytes = Vec::with_capacity(width * height * 4);
-
-        for row in 0..height {
-            let row_start = row * bytes_per_row_aligned as usize;
-            let row_end = row_start + (width * 4);
-
-            if row_end <= data.len() {
-                result_bytes.extend_from_slice(&data[row_start..row_end]);
-            }
-        }
-
-        drop(data);
-        // buffer.unmap();
-        Ok(result_bytes)
     }
 }
