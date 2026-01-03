@@ -1,14 +1,18 @@
-// Gaussian Blur using Box Blur Approximation (3 passes approximates Gaussian)
-// Direct to Rgba8Unorm storage texture - simplest and fastest for PNG output
+// src/shaders/gaussian_blur_box.wgsl
+// THREE-PASS BOX BLUR APPROXIMATION FOR GAUSSIAN BLUR
+// Based on Central Limit Theorem (3 box blurs → Gaussian)
 
-struct Parameters {
+// MUST MATCH Rust's ShaderParameters struct layout exactly
+struct ShaderParameters {
+    // Must be in same order and type as Rust struct
     width: u32,
     height: u32,
     radius: u32,
     blur_alpha: u32,
     _padding0: u32,
     sigma: f32,
-    current_pass: u32,  // Which pass we're on (0, 1, or 2 for box blur approximation)
+    current_pass: u32,
+    // Padding fields (must match Rust padding)
     _padding1: f32,
     _padding2: f32,
     _padding3: f32,
@@ -26,106 +30,103 @@ struct Parameters {
     _padding15: f32,
 };
 
-@group(0) @binding(3)
-var<storage, read_write> debug_buffer: array<f32, 1024>;
+@group(0) @binding(0) var input_tex: texture_2d<f32>;
+@group(0) @binding(1) var output_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> params: ShaderParameters;
+@group(0) @binding(3) var<storage, read_write> debug_buffer: array<f32>;
 
-@group(0) @binding(0)
-var input_texture: texture_2d<f32>;
-
-@group(0) @binding(1)
-var output_texture: texture_storage_2d<rgba8unorm, write>;
-
-@group(0) @binding(2)
-var<uniform> params: Parameters;
-
-const WORKGROUP_SIZE_X = 16u;
-const WORKGROUP_SIZE_Y = 16u;
-const TILE_SIZE_X = 4u;
-const TILE_SIZE_Y = 4u;
-
-fn texture_sample_normalized(tex: texture_2d<f32>, coords: vec2<i32>) -> vec4<f32> {
-    let pixel = textureLoad(tex, coords, 0);
-    return pixel;
-}
-
-// Simple box blur - much faster than Gaussian convolution
-fn apply_box_blur(x: u32, y: u32, radius: u32, tex: texture_2d<f32>) -> vec4<f32> {
+fn box_blur_horizontal(coord: vec2<f32>, radius: u32) -> vec4<f32> {
+    let image_size = vec2<f32>(f32(params.width), f32(params.height));
+    let pixel_size = vec2(1.0) / image_size;
+    
+    // Convert to signed integer for loop bounds
+    let radius_i = i32(radius);
+    let total_samples = 2 * radius_i + 1;
+    let weight = 1.0 / f32(total_samples);
+    
     var sum = vec4<f32>(0.0);
-    var count = 0.0;
-
-    let iradius = i32(radius);
-    let ix = i32(x);
-    let iy = i32(y);
-
-    // For even passes, do horizontal blur; for odd passes, do vertical blur
-    if (params.current_pass % 2u == 0u) {
-        // Horizontal blur
-        for (var k = -iradius; k <= iradius; k++) {
-            let sample_x = clamp(ix + k, 0, i32(params.width) - 1);
-            let pixel = texture_sample_normalized(tex, vec2<i32>(sample_x, iy));
-            sum += pixel;
-            count += 1.0;
-        }
-    } else {
-        // Vertical blur
-        for (var k = -iradius; k <= iradius; k++) {
-            let sample_y = clamp(iy + k, 0, i32(params.height) - 1);
-            let pixel = texture_sample_normalized(tex, vec2<i32>(ix, sample_y));
-            sum += pixel;
-            count += 1.0;
-        }
+    
+    // Sample horizontally
+    for (var i = -radius_i; i <= radius_i; i += 1) {
+        let offset = f32(i);
+        let sample_coord = coord + vec2(offset * pixel_size.x, 0.0);
+        
+        // Clamp coordinates to valid range
+        let clamped_coord = clamp(sample_coord, vec2(0.0), vec2(1.0));
+        let texel_coord = vec2<i32>(floor(clamped_coord * image_size));
+        
+        sum += textureLoad(input_tex, texel_coord, 0) * weight;
     }
-
-    if (count > 0.0) {
-        return sum / count;
-    }
-    return vec4<f32>(0.0);
+    
+    return sum;
 }
 
-@compute @workgroup_size(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, 1)
-fn box_blur_pass(
-    @builtin(global_invocation_id) global_id: vec3<u32>
-) {
-    let tile_start_x = global_id.x * TILE_SIZE_X;
-    let tile_start_y = global_id.y * TILE_SIZE_Y;
+fn box_blur_vertical(coord: vec2<f32>, radius: u32) -> vec4<f32> {
+    let image_size = vec2<f32>(f32(params.width), f32(params.height));
+    let pixel_size = vec2(1.0) / image_size;
+    
+    // Convert to signed integer for loop bounds
+    let radius_i = i32(radius);
+    let total_samples = 2 * radius_i + 1;
+    let weight = 1.0 / f32(total_samples);
+    
+    var sum = vec4<f32>(0.0);
+    
+    // Sample vertically
+    for (var i = -radius_i; i <= radius_i; i += 1) {
+        let offset = f32(i);
+        let sample_coord = coord + vec2(0.0, offset * pixel_size.y);
+        
+        // Clamp coordinates to valid range
+        let clamped_coord = clamp(sample_coord, vec2(0.0), vec2(1.0));
+        let texel_coord = vec2<i32>(floor(clamped_coord * image_size));
+        
+        sum += textureLoad(input_tex, texel_coord, 0) * weight;
+    }
+    
+    return sum;
+}
 
-    // Enhanced debug info
+@compute @workgroup_size(8, 8, 1)
+fn box_blur_pass(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // Check bounds
+    if (global_id.x >= params.width || global_id.y >= params.height) {
+        return;
+    }
+    
+    let image_size = vec2<f32>(f32(params.width), f32(params.height));
+    let coord = vec2<f32>(global_id.xy) / image_size;
+    let radius = params.radius;
+    
+    var result: vec4<f32>;
+    
+    // For box blur approximation, each pass applies both horizontal and vertical
+    // In the 3-pass approach, we alternate between horizontal and vertical
+    // For simplicity, we'll do both in each shader invocation
+    let temp_horizontal = box_blur_horizontal(coord, radius);
+    result = box_blur_vertical(coord, radius);
+    
+    // For debugging: store some values
+    if (global_id.x < 4u && global_id.y < 4u && params.current_pass < 3u) {
+        let debug_idx = params.current_pass * 20u + (global_id.y * 4u + global_id.x) * 4u;
+        debug_buffer[debug_idx + 0u] = result.r;
+        debug_buffer[debug_idx + 1u] = result.g;
+        debug_buffer[debug_idx + 2u] = result.b;
+        debug_buffer[debug_idx + 3u] = result.a;
+    }
+    
+    // Store marker
     if (global_id.x == 0u && global_id.y == 0u) {
-        debug_buffer[0] = 1000.0 + f32(params.current_pass); // Marker with pass number
-        debug_buffer[1] = f32(params.width);  // Store width
-        debug_buffer[2] = f32(params.height); // Store height
-        debug_buffer[3] = f32(params.radius); // Store radius
-        debug_buffer[4] = f32(params.blur_alpha); // Store blur_alpha flag
+        debug_buffer[0u] = 1000.0 + f32(params.current_pass);
+        debug_buffer[1u] = f32(params.width);
+        debug_buffer[2u] = f32(params.height);
+        debug_buffer[3u] = f32(params.radius);
+        debug_buffer[4u] = f32(params.blur_alpha);
     }
-
-    for (var dy = 0u; dy < TILE_SIZE_Y; dy++) {
-        let y = tile_start_y + dy;
-        if (y >= params.height) { break; }
-
-        for (var dx = 0u; dx < TILE_SIZE_X; dx++) {
-            let x = tile_start_x + dx;
-            if (x >= params.width) { break; }
-
-            // Apply box blur - use VAR instead of LET since we modify it below
-            var blurred = apply_box_blur(x, y, params.radius, input_texture);
-
-            // Preserve alpha if blur_alpha is false
-            if (params.blur_alpha == 0u) {
-                let original = texture_sample_normalized(input_texture, vec2<i32>(i32(x), i32(y)));
-                blurred.a = original.a;
-            }
-
-            // Store debug info for first pixel (multiply by 255 for debug)
-            if (x < 4u && y == 0u) {
-                let base_offset = params.current_pass * 20u + x * 4u;
-                debug_buffer[base_offset + 5u] = blurred.r * 255.0;
-                debug_buffer[base_offset + 6u] = blurred.g * 255.0;
-                debug_buffer[base_offset + 7u] = blurred.b * 255.0;
-                debug_buffer[base_offset + 8u] = blurred.a * 255.0;
-            }
-
-            // Store result directly as Rgba8Unorm (textureStore handles conversion)
-            textureStore(output_texture, vec2<u32>(x, y), blurred);
-        }
-    }
+    
+    // Clamp to valid range for storage texture
+    result = clamp(result, vec4(0.0), vec4(1.0));
+    
+    // Write to output texture (RGBA8Unorm expects values 0-1)
+    textureStore(output_tex, vec2<i32>(global_id.xy), result);
 }

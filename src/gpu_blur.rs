@@ -1,4 +1,4 @@
-//! GPU-accelerated Gaussian Blur using wgpu with box blur approximation for large sigma
+//! GPU-accelerated Gaussian Blur using wgpu with 3-pass box blur approximation for large sigma
 
 #[cfg(feature = "gpu")]
 use wgpu::{
@@ -56,7 +56,7 @@ unsafe impl bytemuck::Pod for ShaderParameters {}
 #[cfg(feature = "gpu")]
 unsafe impl bytemuck::Zeroable for ShaderParameters {}
 
-/// GPU Gaussian Blur processor with box blur approximation for large sigma
+/// GPU Gaussian Blur processor with 3-pass box blur approximation for large sigma
 pub struct GpuGaussianBlur {
     #[cfg(feature = "gpu")]
     device: Device,
@@ -101,7 +101,6 @@ impl GpuGaussianBlur {
                 println!("Found adapter: {} ({:?})", info.name, info.device_type);
 
                 if info.device_type != wgpu::DeviceType::IntegratedGpu {
-                    // println!("Using integrated GPU: {}", info.name);
                     println!("Using Nvidia GPU: {}", info.name);
                     found_adapter = Some(adapter);
                     break;
@@ -109,7 +108,6 @@ impl GpuGaussianBlur {
             }
 
             let adapter: wgpu::Adapter = if let Some(ref adp) = found_adapter {
-                // Dereference the &Adapter to clone the underlying handle
                 (*adp).clone()
             } else {
                 println!("No integrated GPU found, requesting default adapter");
@@ -179,8 +177,8 @@ impl GpuGaussianBlur {
                     required_features: wgpu::Features::empty(),
                     required_limits: adapter.limits(),
                     memory_hints: wgpu::MemoryHints::Performance,
-                    experimental_features: Default::default(), // Required in v22+
-                    trace: wgpu::Trace::Off,                   // Required in v22+
+                    experimental_features: Default::default(),
+                    trace: wgpu::Trace::Off,
                 })
                 .await
                 .expect("Failed to create device");
@@ -269,7 +267,7 @@ impl GpuGaussianBlur {
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Blur Layout"),
                 bind_group_layouts: &[&bind_group_layout],
-                immediate_size: 0, // Replaces push_constant_ranges
+                immediate_size: 0,
             });
 
             // Create compute pipeline for box blur
@@ -278,9 +276,9 @@ impl GpuGaussianBlur {
                     label: Some("Box Blur Pipeline"),
                     layout: Some(&pipeline_layout),
                     module: &shader,
-                    entry_point: Some("box_blur_pass"), // Now requires Some()
-                    compilation_options: wgpu::PipelineCompilationOptions::default(), // Required in v22+
-                    cache: None, // Required field in 2026 versions
+                    entry_point: Some("box_blur_pass"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    cache: None,
                 });
 
             Ok(Self {
@@ -296,27 +294,104 @@ impl GpuGaussianBlur {
         }
     }
 
+    /// Calculate optimal box sizes for 3-pass Gaussian approximation
+    /// Uses Central Limit Theorem: 3 box blurs → Gaussian
+    fn boxes_for_gauss_3pass(sigma: f32) -> [usize; 3] {
+        assert!(sigma > 0.0, "Sigma must be positive");
+
+        let n = 3; // Always use 3 passes for good approximation
+
+        // Ideal box width based on Central Limit Theorem
+        let w_ideal = ((12.0 * sigma * sigma / n as f32) + 1.0).sqrt();
+
+        // Lower odd integer (floor to nearest odd)
+        let mut wl = w_ideal.floor() as usize;
+        if wl % 2 == 0 {
+            wl -= 1;
+        }
+        if wl < 1 {
+            wl = 1; // Minimum box size
+        }
+
+        // Upper odd integer
+        let wu = wl + 2;
+
+        // Calculate distribution of sizes
+        let numerator =
+            12.0 * sigma * sigma - (n * wl * wl) as f32 - (4 * n * wl) as f32 - (3 * n) as f32;
+
+        let denominator = -4.0 * wl as f32 - 4.0;
+        let m_ideal = numerator / denominator;
+
+        // Number of passes using wl size
+        let m = m_ideal.round().max(0.0).min(n as f32) as usize;
+
+        // Create array of box sizes
+        let mut sizes = [wl; 3];
+        for i in m..3 {
+            sizes[i] = wu;
+        }
+
+        // Debug output
+        println!("=== 3-Pass Box Blur Approximation ===");
+        println!("Target sigma: {:.2}", sigma);
+        println!("Ideal box width: {:.2}", w_ideal);
+        println!("Box sizes: {:?} (wl={}, wu={})", sizes, wl, wu);
+        println!(
+            "Approximated sigma: {:.2}",
+            (sizes.iter().map(|&w| w as f32 * w as f32).sum::<f32>() / 12.0).sqrt()
+        );
+        println!();
+
+        sizes
+    }
+
     /// Validate that we can process the given sigma value
     pub fn validate_sigma(&self) -> Result<(), String> {
         println!("=== Sigma Validation ===");
         println!("Sigma: {}, Computed Radius: {}", self.sigma, self.radius);
 
-        // For very large sigma, use box blur approximation
+        // Calculate optimal box sizes for 3-pass approximation
+        let box_sizes = Self::boxes_for_gauss_3pass(self.sigma);
+        let box_radii = box_sizes.map(|size| ((size as i32 - 1) / 2).max(0) as u32);
+
+        println!("\n=== 3-Pass Box Blur Configuration ===");
+        for (i, (&size, &radius)) in box_sizes.iter().zip(box_radii.iter()).enumerate() {
+            println!("  Pass {}: box size = {}, radius = {}", i + 1, size, radius);
+        }
+
+        // Calculate the actual sigma this approximates
+        let approximated_sigma =
+            (box_sizes.iter().map(|&w| w as f32 * w as f32).sum::<f32>() / 12.0).sqrt();
+
+        println!("Approximated Gaussian sigma: {:.2}", approximated_sigma);
+        println!("Target Gaussian sigma: {:.2}", self.sigma);
+        println!(
+            "Error: {:.2}%",
+            (approximated_sigma - self.sigma).abs() / self.sigma * 100.0
+        );
+
         if self.sigma > 50.0 {
-            let box_radius = self.calculate_box_radius();
-            println!("Large sigma detected ({}). Using box blur approximation with radius={} for {} passes", 
-                self.sigma, box_radius, BOX_BLUR_PASSES);
-            println!("This will be much faster and avoid GPU timeouts.");
+            println!("\nLarge sigma detected ({}).", self.sigma);
+            println!("Using 3-pass box blur approximation - much faster and avoids GPU timeouts.");
+            println!("Quality should match Metal MPS Gaussian blur.");
         }
 
         Ok(())
     }
 
-    /// Calculate box radius for box blur approximation
-    fn calculate_box_radius(&self) -> u32 {
-        // For 3 box blur passes, the relationship to approximate Gaussian is:
-        // box_radius ≈ sigma * 0.8 / sqrt(3)
-        ((self.sigma * 0.8) / (BOX_BLUR_PASSES as f32).sqrt()).ceil() as u32
+    /// Calculate box radius for 3-pass Gaussian approximation
+    fn calculate_box_radius(&self) -> [u32; 3] {
+        // Get optimal box sizes for 3-pass approximation
+        let box_sizes = Self::boxes_for_gauss_3pass(self.sigma);
+
+        // Convert sizes to radii (radius = (size - 1) / 2)
+        let mut radii = [0u32; 3];
+        for i in 0..3 {
+            radii[i] = ((box_sizes[i] as i32 - 1) / 2).max(0) as u32;
+        }
+
+        radii
     }
 
     /// Apply blur to an image and return as 2D pixel array
@@ -348,7 +423,7 @@ impl GpuGaussianBlur {
         Ok(result)
     }
 
-    /// Apply blur to an image using GPU with box blur approximation for large sigma
+    /// Apply blur to an image using GPU with 3-pass box blur approximation for large sigma
     /// Returns the blurred image data as bytes (RGBA format) for direct saving
     pub fn blur_to_bytes(&self, image: &[Vec<Pixel>]) -> Result<(Vec<u8>, usize, usize), String> {
         #[cfg(not(feature = "gpu"))]
@@ -541,7 +616,7 @@ impl GpuGaussianBlur {
             let intermediate_view2 =
                 intermediate_texture2.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Create output texture (write-only storage, Rgba8Unorm)
+            // Create output texture (needs STORAGE_BINDING for writing from shader, COPY_SRC for readback)
             let output_texture = self.device.create_texture(&TextureDescriptor {
                 label: Some("Output Texture"),
                 size: wgpu::Extent3d {
@@ -704,7 +779,7 @@ fn test_write() {
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
-            }); // CRITICAL: Wait for GPU
+            });
 
             // Read back test results
             let buffer_slice = test_output_buffer.slice(..);
@@ -716,7 +791,7 @@ fn test_write() {
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
-            }); // CRITICAL: Wait for mapping
+            });
 
             let test_result = match receiver.recv() {
                 Ok(Ok(())) => {
@@ -741,10 +816,10 @@ fn test_write() {
 
                     // Check if we got expected colors (within tolerance)
                     let expected = vec![
-                        (255, 0, 0, 255),     // Red
-                        (0, 255, 0, 255),     // Green
-                        (0, 0, 255, 255),     // Blue
-                        (255, 255, 255, 255), // White
+                        (255, 0, 0, 255),
+                        (0, 255, 0, 255),
+                        (0, 0, 255, 255),
+                        (255, 255, 255, 255),
                     ];
 
                     let mut passed = true;
@@ -801,35 +876,46 @@ fn test_write() {
                 timeout: None,
             });
 
-            // === STEP 2: Multiple Box Blur Passes ===
-            println!("\n=== Step 2: Multiple Box Blur Passes (approximates Gaussian) ===");
+            // === STEP 2: 3-Pass Box Blur (Gaussian Approximation) ===
+            println!("\n=== Step 2: 3-Pass Box Blur (Gaussian Approximation) ===");
 
-            // Calculate box radius for approximation
-            let box_radius = self.calculate_box_radius();
+            // Calculate box radii for 3-pass approximation
+            let box_radii = self.calculate_box_radius();
             println!(
-                "Using box blur approximation: radius={} for {} passes",
-                box_radius, BOX_BLUR_PASSES
+                "Using 3-pass box blur approximation for sigma={}",
+                self.sigma
             );
-            println!("This approximates Gaussian with sigma={}", self.sigma);
+            for (i, &radius) in box_radii.iter().enumerate() {
+                println!(
+                    "  Pass {}: box radius = {} (size = {})",
+                    i + 1,
+                    radius,
+                    radius * 2 + 1
+                );
+            }
 
-            // Define clear pass structure: (input_view, output_view)
+            // 3 passes: input -> texture1 -> texture2 -> output (NO FINAL COPY NEEDED)
             let passes = [
-                (&input_view, &intermediate_view1), // Pass 0: Rgba8Unorm -> Rgba8Unorm
-                (&intermediate_view1, &intermediate_view2), // Pass 1: Rgba8Unorm -> Rgba8Unorm
-                (&intermediate_view2, &output_view), // Pass 2: Rgba8Unorm -> Rgba8Unorm
+                (&input_view, &intermediate_view1, box_radii[0]), // Pass 0
+                (&intermediate_view1, &intermediate_view2, box_radii[1]), // Pass 1
+                (&intermediate_view2, &output_view, box_radii[2]), // Pass 2 -> directly to output
             ];
 
-            for (pass_index, (input_view, output_view)) in passes.iter().enumerate() {
+            let total_passes = 3;
+            for (pass_index, (input_view, output_view, radius)) in passes.iter().enumerate() {
                 println!(
                     "\n--- Box Blur Pass {} of {} ---",
                     pass_index + 1,
-                    BOX_BLUR_PASSES
+                    total_passes
                 );
 
+                println!("Box radius: {} (size: {} pixels)", radius, radius * 2 + 1);
+
+                // Update parameters for this pass
                 let params = ShaderParameters {
                     width: width as u32,
                     height: height as u32,
-                    radius: box_radius,
+                    radius: *radius,
                     blur_alpha: self.blur_alpha as u32,
                     _padding0: 0,
                     sigma: self.sigma,
@@ -919,10 +1005,12 @@ fn test_write() {
                 let _ = self.device.poll(wgpu::PollType::Wait {
                     submission_index: None,
                     timeout: None,
-                }); // Wait for GPU to finish
+                });
 
                 println!("Pass {} completed", pass_index + 1);
             }
+
+            println!("\nAll 3 blur passes completed. Output is ready in output_texture.");
 
             // === READ DEBUG BUFFER ===
             println!("\n=== Step 3: Debug Analysis ===");
@@ -951,7 +1039,7 @@ fn test_write() {
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
-            }); // Wait for copy
+            });
 
             let debug_slice = debug_staging_buffer.slice(..);
             let (debug_sender, debug_receiver) = std::sync::mpsc::channel();
@@ -962,7 +1050,7 @@ fn test_write() {
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
-            }); // Wait for mapping
+            });
 
             debug_receiver
                 .recv()
@@ -1063,7 +1151,7 @@ fn test_write() {
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
-            }); // Wait for GPU
+            });
 
             // Read back image results
             let buffer_slice = final_output_buffer.slice(..);
@@ -1075,7 +1163,7 @@ fn test_write() {
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
-            }); // Wait for mapping
+            });
 
             receiver
                 .recv()
@@ -1155,6 +1243,42 @@ fn test_write() {
                     // If we have too much data, truncate
                     println!("Truncating to expected size");
                     result_bytes.truncate(expected_bytes);
+                }
+            }
+
+            // === DEBUG: Verify blur quality ===
+            if result_bytes.len() >= 100 {
+                println!("\n=== Blur Quality Verification ===");
+
+                // Compare first few pixels with input
+                println!("First pixel comparison:");
+                println!(
+                    "  Input:  R={}, G={}, B={}, A={}",
+                    rgba_data[0], rgba_data[1], rgba_data[2], rgba_data[3]
+                );
+                println!(
+                    "  Output: R={}, G={}, B={}, A={}",
+                    result_bytes[0], result_bytes[1], result_bytes[2], result_bytes[3]
+                );
+
+                // Calculate blur amount (difference)
+                let mut total_diff = 0i32;
+                for i in (0..100.min(rgba_data.len()).min(result_bytes.len())).step_by(4) {
+                    for j in 0..3 {
+                        // Only RGB, not alpha
+                        total_diff += (rgba_data[i + j] as i32 - result_bytes[i + j] as i32).abs();
+                    }
+                }
+
+                println!(
+                    "Average pixel difference: {:.2} (higher = more blur)",
+                    total_diff as f32 / (100.0 / 4.0)
+                );
+
+                // For sigma=333.3, expect significant blur
+                if self.sigma > 100.0 && total_diff < 1000 {
+                    println!("WARNING: Blur may be too weak for sigma={}", self.sigma);
+                    println!("Check if box radii are calculated correctly.");
                 }
             }
 
