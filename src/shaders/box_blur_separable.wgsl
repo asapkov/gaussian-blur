@@ -6,7 +6,7 @@ struct BoxBlurParams {
     radius: u32,
     blur_alpha: u32,
     direction: u32,
-    _padding0: u32,  // Padding for 16-byte alignment
+    _padding0: u32,
     _padding1: u32,
     _padding2: u32,
 };
@@ -20,31 +20,12 @@ var output_texture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2)
 var<uniform> params: BoxBlurParams;
 
-@compute @workgroup_size(16, 16, 1)  // Add the 3rd dimension
+@compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
-    // CRITICAL: Check bounds
-    if x >= params.width || y >= params.height {
-        return;
-    }
 
-    // DEBUG: Set top-left pixel to yellow to verify box blur shader execution
-    if x == 0u && y == 0u {
-        textureStore(output_texture, vec2<i32>(0, 0), vec4<f32>(1.0, 1.0, 0.0, 1.0));
-        return;
-    }
-    
-    // DEBUG: Set top-right pixel to orange (if width > 1)
-    if x == params.width - 1u && y == 0u {
-        textureStore(output_texture, vec2<i32>(i32(params.width - 1u), 0), vec4<f32>(1.0, 0.5, 0.0, 1.0));
-        return;
-    }
-    
-    // DEBUG: Set bottom-left pixel to purple (if height > 1)
-    if x == 0u && y == params.height - 1u {
-        textureStore(output_texture, vec2<i32>(0, i32(params.height - 1u)), vec4<f32>(1.0, 0.0, 1.0, 1.0));
+    if x >= params.width || y >= params.height {
         return;
     }
 
@@ -54,7 +35,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let radius = i32(params.radius);
 
     if params.direction == 0u {
-        // Horizontal blur
         for (var i = -radius; i <= radius; i = i + 1) {
             let sample_x = i32(x) + i;
             let clamped_x = clamp(sample_x, 0, i32(params.width) - 1);
@@ -62,7 +42,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             count += 1.0;
         }
     } else {
-        // Vertical blur
         for (var i = -radius; i <= radius; i = i + 1) {
             let sample_y = i32(y) + i;
             let clamped_y = clamp(sample_y, 0, i32(params.height) - 1);
@@ -73,7 +52,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var result = sum / count;
 
-    // Preserve alpha if needed
     if params.blur_alpha == 0u {
         let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
         result.a = original.a;
