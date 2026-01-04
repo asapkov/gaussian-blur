@@ -45,4 +45,8 @@ doesn't work implicitly.
 
 9. WGSL doesn't have ternary operator!
 
+10. In WSGL in textureStore vectors are of type i32, not u 32! Example:
+
+textureStore(output_texture, vec2<i32>(x_i, y_i), result); // <i32> -- this is correct!
+
 

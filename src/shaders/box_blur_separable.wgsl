@@ -15,37 +15,40 @@ struct BoxBlurParams {
 var input_texture: texture_2d<f32>;
 
 @group(0) @binding(1)
-var output_texture: texture_storage_2d<rgba8unorm, write>;
+var output_texture: texture_storage_2d<rgba16float, write>;
 
 @group(0) @binding(2)
 var<uniform> params: BoxBlurParams;
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
+    let x_u = global_id.x;
+    let y_u = global_id.y;
 
-    if x >= params.width || y >= params.height {
+    if x_u >= params.width || y_u >= params.height {
         return;
     }
+
+    let x_i = i32(x_u);
+    let y_i = i32(y_u);  // FIXED: Changed from i32(y_i) to i32(y_u)
 
     var sum = vec4<f32>(0.0);
     var count: f32 = 0.0;
 
-    let radius = i32(params.radius);
+    let radius_i = i32(params.radius);
 
     if params.direction == 0u {
-        for (var i = -radius; i <= radius; i = i + 1) {
-            let sample_x = i32(x) + i;
+        for (var i = -radius_i; i <= radius_i; i = i + 1) {
+            let sample_x = x_i + i;
             let clamped_x = clamp(sample_x, 0, i32(params.width) - 1);
-            sum += textureLoad(input_texture, vec2<i32>(clamped_x, i32(y)), 0);
+            sum += textureLoad(input_texture, vec2<i32>(clamped_x, y_i), 0);
             count += 1.0;
         }
     } else {
-        for (var i = -radius; i <= radius; i = i + 1) {
-            let sample_y = i32(y) + i;
+        for (var i = -radius_i; i <= radius_i; i = i + 1) {
+            let sample_y = y_i + i;
             let clamped_y = clamp(sample_y, 0, i32(params.height) - 1);
-            sum += textureLoad(input_texture, vec2<i32>(i32(x), clamped_y), 0);
+            sum += textureLoad(input_texture, vec2<i32>(x_i, clamped_y), 0);
             count += 1.0;
         }
     }
@@ -53,9 +56,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var result = sum / count;
 
     if params.blur_alpha == 0u {
-        let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
+        let original = textureLoad(input_texture, vec2<i32>(x_i, y_i), 0);
         result.a = original.a;
     }
 
-    textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
+    textureStore(output_texture, vec2<i32>(x_i, y_i), result);
 }

@@ -17,7 +17,7 @@ struct GaussianWeights {
 var input_texture: texture_2d<f32>;
 
 @group(0) @binding(1)
-var output_texture: texture_storage_2d<rgba8unorm, write>;
+var output_texture: texture_storage_2d<rgba16float, write>;
 
 @group(0) @binding(2)
 var<uniform> params: GaussianBlurParams;
@@ -25,7 +25,7 @@ var<uniform> params: GaussianBlurParams;
 @group(0) @binding(3)
 var<uniform> gaussian_weights: GaussianWeights;
 
-var<workgroup> tile: array<vec4<f32>, 400>; // 20x20 tile for 16x16 workgroup + halo
+var<workgroup> tile: array<vec4<f32>, 576>; // 24x24 tile for 16x16 workgroup + 8 pixel halo
 
 @compute @workgroup_size(16, 16, 1)
 fn main(
@@ -66,12 +66,15 @@ fn main(
     workgroupBarrier();
     
     // Process from shared memory
-    let x = global_id.x;
-    let y = global_id.y;
+    let x_u = global_id.x;
+    let y_u = global_id.y;
 
-    if x >= params.width || y >= params.height {
+    if x_u >= params.width || y_u >= params.height {
         return;
     }
+
+    let x_i = i32(x_u);
+    let y_i = i32(y_u);
 
     let local_x_u = local_id.x + halo;
     let local_y_u = local_id.y + halo;
@@ -81,13 +84,13 @@ fn main(
     var sum = vec4<f32>(0.0);
     var weight_sum = 0.0;
 
-    let radius = i32(params.radius);
+    let radius_i = i32(params.radius);
 
     if params.direction == 0u {
         // Horizontal blur from shared memory
-        for (var k = -radius; k <= radius; k++) {
+        for (var k = -radius_i; k <= radius_i; k = k + 1) {
             let sample_local_x = local_x + k;
-            let weight_idx = u32(k + radius);
+            let weight_idx = u32(k + radius_i);
 
             let vec4_idx = weight_idx / 4u;
             let component_idx = weight_idx % 4u;
@@ -110,9 +113,9 @@ fn main(
         }
     } else {
         // Vertical blur from shared memory
-        for (var k = -radius; k <= radius; k++) {
+        for (var k = -radius_i; k <= radius_i; k = k + 1) {
             let sample_local_y = local_y + k;
-            let weight_idx = u32(k + radius);
+            let weight_idx = u32(k + radius_i);
 
             let vec4_idx = weight_idx / 4u;
             let component_idx = weight_idx % 4u;
@@ -148,5 +151,5 @@ fn main(
         result.a = original.a;
     }
 
-    textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
+    textureStore(output_texture, vec2<i32>(x_i, y_i), result);
 }

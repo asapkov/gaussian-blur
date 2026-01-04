@@ -18,7 +18,7 @@ struct GaussianWeights {
 var input_texture: texture_2d<f32>;
 
 @group(0) @binding(1)
-var output_texture: texture_storage_2d<rgba8unorm, write>;
+var output_texture: texture_storage_2d<rgba16float, write>;
 
 @group(0) @binding(2)
 var<uniform> params: GaussianBlurParams;
@@ -34,28 +34,33 @@ fn hash12(p: vec2<f32>) -> f32 {
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
+    let x_u = global_id.x;
+    let y_u = global_id.y;
 
-    if x >= params.width || y >= params.height {
+    if x_u >= params.width || y_u >= params.height {
         return;
     }
 
+    let x_i = i32(x_u);
+    let y_i = i32(y_u);
+    var result: vec4<f32>;
+
     if params.direction == 0u {
         // HORIZONTAL BLUR
-        let radius = i32(params.radius);
+        let radius_i = i32(params.radius);
         var sum = vec4<f32>(0.0);
         var weight_sum = 0.0;
 
-        for (var k = -radius; k <= radius; k++) {
-            let sample_x = clamp(i32(x) + k, 0, i32(params.width) - 1);
-            let weight_idx = u32(k + radius);
+        for (var k = -radius_i; k <= radius_i; k = k + 1) {
+            let sample_x = clamp(x_i + k, 0, i32(params.width) - 1);
+            let weight_idx = u32(k + radius_i);
 
             let vec4_idx = weight_idx / 4u;
             let component_idx = weight_idx % 4u;
             let weight_vec = gaussian_weights.weights[vec4_idx];
             var weight: f32;
 
+            // WGSL doesn't have switch for non-integer types, use if-else
             if component_idx == 0u {
                 weight = weight_vec.x;
             } else if component_idx == 1u {
@@ -66,38 +71,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 weight = weight_vec.w;
             }
 
-            sum += textureLoad(input_texture, vec2<i32>(sample_x, i32(y)), 0) * weight;
+            sum += textureLoad(input_texture, vec2<i32>(sample_x, y_i), 0) * weight;
             weight_sum += weight;
         }
 
-        var result: vec4<f32>;
         if weight_sum > 0.0 {
             result = sum / weight_sum;
         } else {
             result = vec4<f32>(0.0);
         }
-
-        // Add subtle dithering to reduce banding
-        let dither = hash12(vec2<f32>(f32(x), f32(y))) * 0.0039; // 1/256
-        
-        // Preserve alpha if needed
-        if params.blur_alpha == 0u {
-            let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
-            result = vec4<f32>(result.rgb + vec3<f32>(dither), original.a);
-        } else {
-            result = vec4<f32>(result.rgb + vec3<f32>(dither), result.a);
-        }
-
-        textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
     } else {
         // VERTICAL BLUR
-        let radius = i32(params.radius);
+        let radius_i = i32(params.radius);
         var sum = vec4<f32>(0.0);
         var weight_sum = 0.0;
 
-        for (var k = -radius; k <= radius; k++) {
-            let sample_y = clamp(i32(y) + k, 0, i32(params.height) - 1);
-            let weight_idx = u32(k + radius);
+        for (var k = -radius_i; k <= radius_i; k = k + 1) {
+            let sample_y = clamp(y_i + k, 0, i32(params.height) - 1);
+            let weight_idx = u32(k + radius_i);
 
             let vec4_idx = weight_idx / 4u;
             let component_idx = weight_idx % 4u;
@@ -114,28 +105,27 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 weight = weight_vec.w;
             }
 
-            sum += textureLoad(input_texture, vec2<i32>(i32(x), sample_y), 0) * weight;
+            sum += textureLoad(input_texture, vec2<i32>(x_i, sample_y), 0) * weight;
             weight_sum += weight;
         }
 
-        var result: vec4<f32>;
         if weight_sum > 0.0 {
             result = sum / weight_sum;
         } else {
             result = vec4<f32>(0.0);
         }
-
-        // Add subtle dithering to reduce banding
-        let dither = hash12(vec2<f32>(f32(x), f32(y))) * 0.0039; // 1/256
-        
-        // Preserve alpha if needed
-        if params.blur_alpha == 0u {
-            let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
-            result = vec4<f32>(result.rgb + vec3<f32>(dither), original.a);
-        } else {
-            result = vec4<f32>(result.rgb + vec3<f32>(dither), result.a);
-        }
-
-        textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
     }
+
+    // Add subtle dithering to reduce banding
+    let dither = hash12(vec2<f32>(f32(x_u), f32(y_u))) * 0.0039; // 1/256
+    
+    // Preserve alpha if needed
+    if params.blur_alpha == 0u {
+        let original = textureLoad(input_texture, vec2<i32>(x_i, y_i), 0);
+        result = vec4<f32>(result.rgb + vec3<f32>(dither), original.a);
+    } else {
+        result = vec4<f32>(result.rgb + vec3<f32>(dither), result.a);
+    }
+
+    textureStore(output_texture, vec2<i32>(x_i, y_i), result);
 }

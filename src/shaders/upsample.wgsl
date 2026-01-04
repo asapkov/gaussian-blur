@@ -11,24 +11,27 @@ struct UpsampleParams {
 var input_texture: texture_2d<f32>;
 
 @group(0) @binding(1)
-var output_texture: texture_storage_2d<rgba8unorm, write>;
+var output_texture: texture_storage_2d<rgba16float, write>;
 
 @group(0) @binding(2)
 var<uniform> params: UpsampleParams;
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let dst_x = global_id.x;
-    let dst_y = global_id.y;
+    let dst_x_u = global_id.x;
+    let dst_y_u = global_id.y;
 
-    if dst_x >= params.dst_width || dst_y >= params.dst_height {
+    if dst_x_u >= params.dst_width || dst_y_u >= params.dst_height {
         return;
     }
 
+    let dst_x_i = i32(dst_x_u);
+    let dst_y_i = i32(dst_y_u);
+
     // Map destination pixel to source texture space
     // Use +0.5 to sample from pixel centers
-    let src_x = (f32(dst_x) + 0.5) * f32(params.src_width) / f32(params.dst_width);
-    let src_y = (f32(dst_y) + 0.5) * f32(params.src_height) / f32(params.dst_height);
+    let src_x = (f32(dst_x_u) + 0.5) * f32(params.src_width) / f32(params.dst_width);
+    let src_y = (f32(dst_y_u) + 0.5) * f32(params.src_height) / f32(params.dst_height);
     
     // Get integer coordinates
     let x0 = u32(floor(src_x - 0.5));
@@ -55,5 +58,5 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let bottom = mix(p01, p11, fx_clamped);
     let result = mix(top, bottom, fy_clamped);
 
-    textureStore(output_texture, vec2<i32>(i32(dst_x), i32(dst_y)), result);
+    textureStore(output_texture, vec2<i32>(dst_x_i, dst_y_i), result);
 }

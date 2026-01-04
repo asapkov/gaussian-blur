@@ -16,12 +16,12 @@ struct BoxBlurParams {
 var input_texture: texture_2d<f32>;
 
 @group(0) @binding(1)
-var output_texture: texture_storage_2d<rgba8unorm, write>;
+var output_texture: texture_storage_2d<rgba16float, write>;
 
 @group(0) @binding(2)
 var<uniform> params: BoxBlurParams;
 
-var<workgroup> tile: array<vec4<f32>, 400>; // (16+8)*(16+8) = 24*24 = 576, but using 400 for 20x20 for simplicity
+var<workgroup> tile: array<vec4<f32>, 576>; // 24x24 = 576 (16+8)*(16+8)
 
 @compute @workgroup_size(16, 16, 1)
 fn main(
@@ -62,12 +62,15 @@ fn main(
     workgroupBarrier();
     
     // Process tile
-    let x = global_id.x;
-    let y = global_id.y;
+    let x_u = global_id.x;
+    let y_u = global_id.y;
 
-    if x >= params.width || y >= params.height {
+    if x_u >= params.width || y_u >= params.height {
         return;
     }
+
+    let x_i = i32(x_u);
+    let y_i = i32(y_u);
 
     let local_x_u = local_id.x + halo;
     let local_y_u = local_id.y + halo;
@@ -77,11 +80,11 @@ fn main(
     var sum = vec4<f32>(0.0);
     var count: f32 = 0.0;
 
-    let radius = i32(params.radius);
+    let radius_i = i32(params.radius);
 
     if params.direction == 0u {
         // Horizontal blur from shared memory
-        for (var i = -radius; i <= radius; i = i + 1) {
+        for (var i = -radius_i; i <= radius_i; i = i + 1) {
             let sample_local_x = local_x + i;
             let idx = u32(sample_local_x) + local_y_u * tile_w;
             sum += tile[idx];
@@ -89,7 +92,7 @@ fn main(
         }
     } else {
         // Vertical blur from shared memory
-        for (var i = -radius; i <= radius; i = i + 1) {
+        for (var i = -radius_i; i <= radius_i; i = i + 1) {
             let sample_local_y = local_y + i;
             let idx = local_x_u + u32(sample_local_y) * tile_w;
             sum += tile[idx];
@@ -106,5 +109,5 @@ fn main(
         result.a = original.a;
     }
 
-    textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
+    textureStore(output_texture, vec2<i32>(x_i, y_i), result);
 }

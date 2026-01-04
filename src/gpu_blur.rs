@@ -6,7 +6,7 @@
 //! - Large sigmas (> 32.0): Downsample -> blur -> upsample pipeline
 //!
 //! All shaders assume a workgroup size of 16x16 threads.
-//! All textures use Rgba8Unorm format for compatibility.
+//! All textures use Rgba16Float format for higher precision.
 
 #[cfg(feature = "gpu")]
 use wgpu::{
@@ -41,14 +41,14 @@ const WORKGROUP_SIZE_X: u32 = 16;
 /// Workgroup size in Y dimension (assumed by all shaders)
 const WORKGROUP_SIZE_Y: u32 = 16;
 
-/// Texture format used throughout the pipeline
-const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
+/// Texture format used throughout the pipeline - CHANGED TO Rgba16Float for higher precision
+const TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 /// Row alignment for texture data transfers (bytes)
 const ROW_ALIGNMENT: u32 = 256;
 
-/// Bytes per pixel (RGBA)
-const BYTES_PER_PIXEL: u32 = 4;
+/// Bytes per pixel (RGBA) - CHANGED TO 8 bytes for Rgba16Float
+const BYTES_PER_PIXEL: u32 = 8;
 
 /// Threshold for using small radius optimized shader
 const SMALL_RADIUS_THRESHOLD: u32 = 8;
@@ -200,9 +200,9 @@ struct DownsampleConfig {
 enum BlurStrategy {
     /// True Gaussian convolution for small sigmas (≤ 2.0)
     Gaussian,
-    /// 3-pass box blur approximation for medium sigmas (2.0-5.0)
+    /// 3-pass box blur approximation for medium sigmas (2.0-32.0)
     Box3Pass,
-    /// Downsample -> blur -> upsample for large sigmas (> 5.0)
+    /// Downsample -> blur -> upsample for large sigmas (> 32.0)
     Downsample(DownsampleConfig),
 }
 
@@ -471,6 +471,7 @@ impl GpuGaussianBlur {
         } else if sigma <= DOWNSAMPLE_THRESHOLD {
             BlurStrategy::Box3Pass
         } else {
+            // Start downsampling earlier for better performance
             let factor = if sigma > LARGE_SIGMA_THRESHOLD {
                 8
             } else if sigma > 64.0 {
@@ -807,11 +808,39 @@ impl GpuGaussianBlur {
         let rgba_bytes = image_to_rgba_bytes(image, width, height);
         let bytes_per_row_aligned = calculate_aligned_row_size(width);
 
+        // Convert 8-bit RGBA to 16-bit float for upload
         let aligned_row_size = bytes_per_row_aligned as usize;
         let unaligned_row_size = width * BYTES_PER_PIXEL as usize;
 
+        // Prepare buffer for 16-bit float texture
+        let mut float_data = Vec::with_capacity(height * unaligned_row_size);
+
+        for y in 0..height {
+            let row_start = y * width * 4;
+            for x in 0..width {
+                let pixel_offset = row_start + x * 4;
+
+                // Convert each 8-bit channel to f32, then to half precision (f16)
+                let r = rgba_bytes[pixel_offset] as f32 / 255.0;
+                let g = rgba_bytes[pixel_offset + 1] as f32 / 255.0;
+                let b = rgba_bytes[pixel_offset + 2] as f32 / 255.0;
+                let a = rgba_bytes[pixel_offset + 3] as f32 / 255.0;
+
+                // Convert f32 to f16 (using simple conversion - in practice use a proper f16 library)
+                let r_f16 = half::f16::from_f32(r).to_le_bytes();
+                let g_f16 = half::f16::from_f32(g).to_le_bytes();
+                let b_f16 = half::f16::from_f32(b).to_le_bytes();
+                let a_f16 = half::f16::from_f32(a).to_le_bytes();
+
+                float_data.extend_from_slice(&r_f16);
+                float_data.extend_from_slice(&g_f16);
+                float_data.extend_from_slice(&b_f16);
+                float_data.extend_from_slice(&a_f16);
+            }
+        }
+
         if aligned_row_size == unaligned_row_size {
-            self.upload_bytes_to_gpu(&rgba_bytes, width, height, bytes_per_row_aligned)
+            self.upload_bytes_to_gpu(&float_data, width, height, bytes_per_row_aligned)
         } else {
             let mut padded_data = Vec::with_capacity(height * aligned_row_size);
 
@@ -819,7 +848,7 @@ impl GpuGaussianBlur {
                 let src_start = y * unaligned_row_size;
                 let src_end = src_start + unaligned_row_size;
 
-                padded_data.extend_from_slice(&rgba_bytes[src_start..src_end]);
+                padded_data.extend_from_slice(&float_data[src_start..src_end]);
                 padded_data.resize(
                     padded_data.len() + (aligned_row_size - unaligned_row_size),
                     0,
@@ -967,15 +996,36 @@ impl GpuGaussianBlur {
         let unaligned_row_size = width * BYTES_PER_PIXEL as usize;
         let aligned_row_size = bytes_per_row_aligned as usize;
 
-        let mut result = Vec::with_capacity(width * height * BYTES_PER_PIXEL as usize);
+        let mut float_data = Vec::with_capacity(width * height * 4);
+        let mut result = Vec::with_capacity(width * height * 4);
 
         for y in 0..height {
             let src_start = y * aligned_row_size;
-            result.extend_from_slice(&data[src_start..src_start + unaligned_row_size]);
+            float_data.extend_from_slice(&data[src_start..src_start + unaligned_row_size]);
         }
 
         drop(data);
         staging_buffer.unmap();
+
+        // Convert 16-bit float back to 8-bit RGBA
+        for i in 0..(width * height) {
+            let offset = i * 8; // 8 bytes per pixel (4 channels * 2 bytes each)
+
+            if offset + 7 < float_data.len() {
+                let r_f16 = half::f16::from_le_bytes([float_data[offset], float_data[offset + 1]]);
+                let g_f16 =
+                    half::f16::from_le_bytes([float_data[offset + 2], float_data[offset + 3]]);
+                let b_f16 =
+                    half::f16::from_le_bytes([float_data[offset + 4], float_data[offset + 5]]);
+                let a_f16 =
+                    half::f16::from_le_bytes([float_data[offset + 6], float_data[offset + 7]]);
+
+                result.push((r_f16.to_f32() * 255.0).clamp(0.0, 255.0) as u8);
+                result.push((g_f16.to_f32() * 255.0).clamp(0.0, 255.0) as u8);
+                result.push((b_f16.to_f32() * 255.0).clamp(0.0, 255.0) as u8);
+                result.push((a_f16.to_f32() * 255.0).clamp(0.0, 255.0) as u8);
+            }
+        }
 
         Ok((result, width, height))
     }
