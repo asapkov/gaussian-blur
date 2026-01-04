@@ -1,12 +1,13 @@
 // Simple 2x downsample shader
 
-struct ShaderParameters {
+struct DownsampleParams {
     src_width: u32,
     src_height: u32,
     dst_width: u32,
     dst_height: u32,
     _padding: vec4<u32>,
 };
+
 
 @group(0) @binding(0)
 var input_texture: texture_2d<f32>;
@@ -15,9 +16,9 @@ var input_texture: texture_2d<f32>;
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 @group(0) @binding(2)
-var<uniform> params: ShaderParameters;
+var<uniform> params: DownsampleParams;
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(16, 16, 1)  // Add the 3rd dimension
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dst_x = global_id.x;
     let dst_y = global_id.y;

@@ -1,6 +1,6 @@
 // Optimized separable box blur with shared memory tiling
 
-struct ShaderParameters {
+struct BoxBlurParams {
     width: u32,
     height: u32,
     radius: u32,
@@ -9,6 +9,7 @@ struct ShaderParameters {
     _padding: vec3<u32>,
 };
 
+
 @group(0) @binding(0)
 var input_texture: texture_2d<f32>;
 
@@ -16,9 +17,9 @@ var input_texture: texture_2d<f32>;
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 @group(0) @binding(2)
-var<uniform> params: ShaderParameters;
+var<uniform> params: BoxBlurParams;
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(16, 16, 1)  // Add the 3rd dimension
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;

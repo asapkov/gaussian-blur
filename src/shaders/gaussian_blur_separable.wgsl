@@ -1,7 +1,7 @@
 // True separable Gaussian blur with precomputed weights
 // Uses vec4<f32> array for proper 16-byte alignment
 
-struct ShaderParameters {
+struct GaussianBlurParams {
     width: u32,
     height: u32,
     radius: u32,
@@ -11,6 +11,10 @@ struct ShaderParameters {
     _padding: vec2<u32>,
 };
 
+struct GaussianWeights {
+    weights: array<vec4<f32>, 256>,
+};
+
 @group(0) @binding(0)
 var input_texture: texture_2d<f32>;
 
@@ -18,18 +22,18 @@ var input_texture: texture_2d<f32>;
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 @group(0) @binding(2)
-var<uniform> params: ShaderParameters;
+var<uniform> params: GaussianBlurParams;
 
 // Use array with stride 16 (vec4<f32>) to meet alignment requirements
 // Max kernel size = 1024 weights (256 * 4) supporting radius up to 511
 @group(0) @binding(3)
-var<uniform> gaussian_weights: array<vec4<f32>, 256>;
+var<uniform> gaussian_weights: GaussianWeights;
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
+
     // CRITICAL: Check bounds
     if x >= params.width || y >= params.height {
         return;
@@ -48,7 +52,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             // Extract weight from vec4 array (packed 4 weights per vec4)
             let vec4_idx = weight_idx / 4u;
             let component_idx = weight_idx % 4u;
-            let weight_vec = gaussian_weights[vec4_idx];
+            let weight_vec = gaussian_weights.weights[vec4_idx];
             var weight: f32;
 
             // Get the correct component
@@ -93,7 +97,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             // Extract weight from vec4 array (packed 4 weights per vec4)
             let vec4_idx = weight_idx / 4u;
             let component_idx = weight_idx % 4u;
-            let weight_vec = gaussian_weights[vec4_idx];
+            let weight_vec = gaussian_weights.weights[vec4_idx];
             var weight: f32;
 
             // Get the correct component
