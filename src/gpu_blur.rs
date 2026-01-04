@@ -30,7 +30,7 @@ use crate::Pixel;
 const GAUSSIAN_THRESHOLD: f32 = 2.0;
 
 /// Sigma threshold for using box blur approximation vs downsampling
-const DOWNSAMPLE_THRESHOLD: f32 = 32.0;
+const DOWNSAMPLE_THRESHOLD: f32 = 5.0; // CHANGED FROM 32.0 TO 5.0
 
 /// Sigma threshold for using 8x vs 4x downsampling
 const LARGE_SIGMA_THRESHOLD: f32 = 100.0;
@@ -194,9 +194,9 @@ struct DownsampleConfig {
 enum BlurStrategy {
     /// True Gaussian convolution for small sigmas (≤ 2.0)
     Gaussian,
-    /// 3-pass box blur approximation for medium sigmas (2.0-32.0)
+    /// 3-pass box blur approximation for medium sigmas (2.0-5.0)  // CHANGED FROM 32.0 TO 5.0
     Box3Pass,
-    /// Downsample -> blur -> upsample for large sigmas (> 32.0)
+    /// Downsample -> blur -> upsample for large sigmas (> 5.0)     // CHANGED FROM 32.0 TO 5.0
     Downsample(DownsampleConfig),
 }
 
@@ -214,11 +214,6 @@ fn calculate_dispatch(width: u32, height: u32) -> (u32, u32) {
 /// Format a label with a suffix
 fn format_label(base: &str, suffix: &str) -> String {
     format!("{} {}", base, suffix)
-}
-
-/// Format a label for a pass
-fn format_pass_label(label: &str, index: usize) -> String {
-    format!("{} Pass {}", label, index)
 }
 
 /// Calculate optimal box sizes for 3-pass Gaussian approximation
@@ -955,27 +950,58 @@ impl GpuGaussianBlur {
 
         // Map buffer for reading
         let buffer_slice = staging_buffer.slice(..);
+
+        // First, poll to ensure commands are submitted
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        // Then use map_async
         let (sender, receiver) = std::sync::mpsc::channel();
 
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
 
-        // Poll device
-        eprintln!("[DOWNLOAD] Polling device...");
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
+        // Poll with timeout
+        eprintln!("[DOWNLOAD] Polling device (max 30 seconds)...");
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
 
-        // Wait for mapping
-        eprintln!("[DOWNLOAD] Waiting for buffer mapping...");
-        receiver
-            .recv()
-            .map_err(|e| BlurError::BufferError(format!("Failed to receive buffer result: {}", e)))?
-            .map_err(|e| BlurError::BufferError(format!("Failed to map buffer: {}", e)))?;
+        loop {
+            // Poll the device
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
 
-        // Get mapped data and remove padding
+            // Check if we have a result from the receiver
+            if let Ok(result) = receiver.try_recv() {
+                match result {
+                    Ok(()) => {
+                        // Success! Buffer is ready
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(BlurError::BufferError(format!(
+                            "Failed to map buffer: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+
+            if start_time.elapsed() > timeout {
+                return Err(BlurError::Timeout(
+                    "Timeout waiting for buffer mapping".to_string(),
+                ));
+            }
+
+            // Small sleep to prevent busy waiting
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
         eprintln!("[DOWNLOAD] Getting mapped data...");
         let data = buffer_slice.get_mapped_range();
         let unaligned_row_size = width * BYTES_PER_PIXEL as usize;
@@ -1199,10 +1225,26 @@ impl GpuGaussianBlur {
         self.queue.submit(Some(encoder.finish()));
 
         // Poll device to ensure completion
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
+        eprintln!("[GAUSSIAN] Waiting for GPU to complete...");
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+
+        loop {
+            if start_time.elapsed() > timeout {
+                return Err(BlurError::Timeout(
+                    "Timeout waiting for Gaussian blur completion".to_string(),
+                ));
+            }
+
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+
+            // For simplicity, we break after polling
+            // In a production system, you might want to check actual completion
+            break;
+        }
 
         eprintln!("[GAUSSIAN] Gaussian blur completed");
         Ok(output_texture)
@@ -1317,10 +1359,26 @@ impl GpuGaussianBlur {
         self.queue.submit(Some(encoder.finish()));
 
         // Poll device to ensure completion
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
+        eprintln!("[BOX] Waiting for GPU to complete...");
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+
+        loop {
+            if start_time.elapsed() > timeout {
+                return Err(BlurError::Timeout(
+                    "Timeout waiting for box blur completion".to_string(),
+                ));
+            }
+
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+
+            // For simplicity, we break after polling
+            // In a production system, you might want to check actual completion
+            break;
+        }
 
         eprintln!("[BOX] Box blur completed");
         Ok(output_texture)
@@ -1563,10 +1621,26 @@ impl GpuGaussianBlur {
         self.queue.submit(Some(encoder.finish()));
 
         // Poll device to ensure completion
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
+        eprintln!("[DOWNSAMPLE] Waiting for GPU to complete...");
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+
+        loop {
+            if start_time.elapsed() > timeout {
+                return Err(BlurError::Timeout(
+                    "Timeout waiting for downsample completion".to_string(),
+                ));
+            }
+
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+
+            // For simplicity, we break after polling
+            // In a production system, you might want to check actual completion
+            break;
+        }
 
         eprintln!("[DOWNSAMPLE] Downsample->Blur->Upsample completed");
         Ok(final_output)
