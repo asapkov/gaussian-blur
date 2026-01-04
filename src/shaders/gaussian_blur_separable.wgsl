@@ -8,7 +8,7 @@ struct GaussianBlurParams {
     blur_alpha: u32,  // 0 = preserve alpha, 1 = blur alpha
     direction: u32,   // 0 = horizontal, 1 = vertical
     sigma: f32,
-    _padding: vec2<u32>,
+    // No padding needed - struct is already 28 bytes (4*5 + 4)
 };
 
 struct GaussianWeights {

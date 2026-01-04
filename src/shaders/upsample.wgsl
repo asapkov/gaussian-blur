@@ -1,12 +1,11 @@
-// Simple bilinear upsample shader
+// Bilinear upsample shader with variable scale factor
 
-// upsample.wgsl
 struct UpsampleParams {
     src_width: u32,
     src_height: u32,
     dst_width: u32,
     dst_height: u32,
-    _padding: vec4<u32>,
+    // No padding needed - struct is already 16 bytes (4*4)
 };
 
 @group(0) @binding(0)
@@ -18,7 +17,7 @@ var output_texture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2)
 var<uniform> params: UpsampleParams;
 
-@compute @workgroup_size(16, 16, 1)  // Add the 3rd dimension
+@compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dst_x = global_id.x;
     let dst_y = global_id.y;
@@ -28,17 +27,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Map to source coordinates
-    let src_x = f32(dst_x) * f32(params.src_width) / f32(params.dst_width);
-    let src_y = f32(dst_y) * f32(params.src_height) / f32(params.dst_height);
+    // Map to normalized source coordinates (0 to 1)
+    let src_x_norm = f32(dst_x) / f32(params.dst_width - 1u);
+    let src_y_norm = f32(dst_y) / f32(params.dst_height - 1u);
+    
+    // Convert to pixel coordinates
+    let src_x_f = src_x_norm * f32(params.src_width - 1u);
+    let src_y_f = src_y_norm * f32(params.src_height - 1u);
+    
+    // Get integer coordinates
+    let x0 = u32(floor(src_x_f));
+    let y0 = u32(floor(src_y_f));
+    let x1 = min(x0 + 1u, params.src_width - 1u);
+    let y1 = min(y0 + 1u, params.src_height - 1u);
+    
+    // Calculate interpolation weights
+    let fx = src_x_f - f32(x0);
+    let fy = src_y_f - f32(y0);
+    
+    // Sample four points
+    let p00 = textureLoad(input_texture, vec2<i32>(i32(x0), i32(y0)), 0);
+    let p10 = textureLoad(input_texture, vec2<i32>(i32(x1), i32(y0)), 0);
+    let p01 = textureLoad(input_texture, vec2<i32>(i32(x0), i32(y1)), 0);
+    let p11 = textureLoad(input_texture, vec2<i32>(i32(x1), i32(y1)), 0);
+    
+    // Bilinear interpolation
+    let top = mix(p00, p10, fx);
+    let bottom = mix(p01, p11, fx);
+    let result = mix(top, bottom, fy);
 
-    // Simple nearest-neighbor for debugging
-    let sample_x = u32(floor(src_x));
-    let sample_y = u32(floor(src_y));
-
-    let clamped_x = min(sample_x, params.src_width - 1u);
-    let clamped_y = min(sample_y, params.src_height - 1u);
-
-    let color = textureLoad(input_texture, vec2<i32>(i32(clamped_x), i32(clamped_y)), 0);
-    textureStore(output_texture, vec2<i32>(i32(dst_x), i32(dst_y)), color);
+    textureStore(output_texture, vec2<i32>(i32(dst_x), i32(dst_y)), result);
 }
