@@ -2,8 +2,8 @@
 
 #![feature(portable_simd)]
 
-use std::f32::consts::PI;
 use rayon::prelude::*;
+use std::f32::consts::PI;
 use std::simd::f32x4;
 
 // At the top with other imports
@@ -32,22 +32,12 @@ impl Pixel {
 
     /// Convert to float array
     pub fn to_f32_array(&self) -> [f32; 4] {
-        [
-            self.r as f32,
-            self.g as f32,
-            self.b as f32,
-            self.a as f32,
-        ]
+        [self.r as f32, self.g as f32, self.b as f32, self.a as f32]
     }
 
     /// Convert to SIMD vector (f32x4)
     pub fn to_simd(&self) -> f32x4 {
-        f32x4::from_array([
-            self.r as f32,
-            self.g as f32,
-            self.b as f32,
-            self.a as f32,
-        ])
+        f32x4::from_array([self.r as f32, self.g as f32, self.b as f32, self.a as f32])
     }
 
     /// Create from float array
@@ -472,9 +462,15 @@ pub fn gaussian_blur_3x3(image: &[Vec<Pixel>], blur_alpha: bool) -> Vec<Vec<Pixe
 
     // Predefined normalized 3x3 kernel
     let kernel: &[f32] = &[
-        1.0/16.0, 2.0/16.0, 1.0/16.0,
-        2.0/16.0, 4.0/16.0, 2.0/16.0,
-        1.0/16.0, 2.0/16.0, 1.0/16.0
+        1.0 / 16.0,
+        2.0 / 16.0,
+        1.0 / 16.0,
+        2.0 / 16.0,
+        4.0 / 16.0,
+        2.0 / 16.0,
+        1.0 / 16.0,
+        2.0 / 16.0,
+        1.0 / 16.0,
     ];
 
     (0..height)
@@ -522,11 +518,31 @@ pub fn gaussian_blur_5x5(image: &[Vec<Pixel>], blur_alpha: bool) -> Vec<Vec<Pixe
 
     // Predefined normalized 5x5 kernel (approximation)
     let kernel: &[f32] = &[
-        1.0/273.0,  4.0/273.0,  7.0/273.0,  4.0/273.0, 1.0/273.0,
-        4.0/273.0, 16.0/273.0, 26.0/273.0, 16.0/273.0, 4.0/273.0,
-        7.0/273.0, 26.0/273.0, 41.0/273.0, 26.0/273.0, 7.0/273.0,
-        4.0/273.0, 16.0/273.0, 26.0/273.0, 16.0/273.0, 4.0/273.0,
-        1.0/273.0,  4.0/273.0,  7.0/273.0,  4.0/273.0, 1.0/273.0
+        1.0 / 273.0,
+        4.0 / 273.0,
+        7.0 / 273.0,
+        4.0 / 273.0,
+        1.0 / 273.0,
+        4.0 / 273.0,
+        16.0 / 273.0,
+        26.0 / 273.0,
+        16.0 / 273.0,
+        4.0 / 273.0,
+        7.0 / 273.0,
+        26.0 / 273.0,
+        41.0 / 273.0,
+        26.0 / 273.0,
+        7.0 / 273.0,
+        4.0 / 273.0,
+        16.0 / 273.0,
+        26.0 / 273.0,
+        16.0 / 273.0,
+        4.0 / 273.0,
+        1.0 / 273.0,
+        4.0 / 273.0,
+        7.0 / 273.0,
+        4.0 / 273.0,
+        1.0 / 273.0,
     ];
 
     (0..height)
@@ -572,7 +588,7 @@ pub fn gaussian_blur_5x5(image: &[Vec<Pixel>], blur_alpha: bool) -> Vec<Vec<Pixe
 pub use gpu_blur::GpuGaussianBlur;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-pub use metal_mps_blur::{MetalMPSBlur, blur_with_metal};
+pub use metal_mps_blur::{blur_with_metal, MetalMPSBlur};
 
 #[cfg(feature = "gpu")]
 mod gpu_blur;
@@ -617,40 +633,40 @@ impl UnifiedGaussianBlur {
             metal_kernel_size: None,
         }
     }
-    
+
     /// Use GPU backend (requires 'gpu' feature)
     #[cfg(feature = "gpu")]
     pub fn with_gpu(mut self) -> Self {
         self.backend = BlurBackend::Gpu;
         self
     }
-    
+
     /// Use CPU backend
     pub fn with_cpu(mut self) -> Self {
         self.backend = BlurBackend::Cpu;
         self
     }
-    
+
     /// Use Metal backend (requires 'metal' feature and macOS)
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub fn with_metal(mut self) -> Self {
         self.backend = BlurBackend::Metal;
         self
     }
-    
+
     /// Set Metal kernel size (macOS only)
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub fn with_metal_kernel_size(mut self, kernel_size: u32) -> Self {
         self.metal_kernel_size = Some(kernel_size);
         self
     }
-    
+
     /// Set number of threads (CPU only)
     pub fn with_threads(mut self, num_threads: usize) -> Self {
         self.num_threads = Some(num_threads);
         self
     }
-    
+
     /// Enable SIMD optimizations (CPU only)
     pub fn with_simd(mut self, enable: bool) -> Self {
         self.use_simd = enable;
@@ -662,7 +678,7 @@ impl UnifiedGaussianBlur {
         if image.is_empty() {
             return (Vec::new(), 0, 0);
         }
-        
+
         let height = image.len();
         let width = image[0].len();
         let mut bytes = Vec::with_capacity(width * height * 4);
@@ -683,7 +699,7 @@ impl UnifiedGaussianBlur {
     fn bytes_to_image(bytes: &[u8], width: u32, height: u32) -> Vec<Vec<Pixel>> {
         let width = width as usize;
         let height = height as usize;
-        
+
         if bytes.is_empty() || width == 0 || height == 0 {
             return Vec::new();
         }
@@ -712,15 +728,15 @@ impl UnifiedGaussianBlur {
 
     /// Fallback to CPU implementation for bytes
     fn blur_to_bytes_fallback(&self, image: &[Vec<Pixel>]) -> (Vec<u8>, u32, u32) {
-        let cpu_blur = GaussianBlur::new(self.sigma, self.radius, self.blur_alpha)
-            .with_simd(self.use_simd);
-        
+        let cpu_blur =
+            GaussianBlur::new(self.sigma, self.radius, self.blur_alpha).with_simd(self.use_simd);
+
         let pixels = if let Some(threads) = self.num_threads {
             cpu_blur.with_threads(threads).blur(image)
         } else {
             cpu_blur.blur(image)
         };
-        
+
         Self::image_to_bytes(&pixels)
     }
 
@@ -742,9 +758,9 @@ impl UnifiedGaussianBlur {
                 let future = async {
                     match GpuGaussianBlur::new(self.sigma, self.radius, self.blur_alpha).await {
                         Ok(gpu_blur) => {
-                            // GpuGaussianBlur::blur_to_bytes returns Result<(Vec<u8>, usize, usize), String>
+                            // blur_to_bytes now returns Result<_, String>
                             gpu_blur.blur_to_bytes(image)
-                        },
+                        }
                         Err(e) => Err(format!("Failed to create GPU blur: {}", e)),
                     }
                 };
@@ -752,7 +768,7 @@ impl UnifiedGaussianBlur {
                 match pollster::block_on(future) {
                     Ok((blurred_bytes, width, height)) => {
                         Ok((blurred_bytes, width as u32, height as u32))
-                    },
+                    }
                     Err(e) => {
                         eprintln!("GPU blur failed: {}, falling back to CPU", e);
                         // Fall back to CPU
@@ -765,7 +781,7 @@ impl UnifiedGaussianBlur {
             BlurBackend::Metal => {
                 // Use Metal backend
                 let (bytes, width, height) = Self::image_to_bytes(image);
-                
+
                 match MetalMPSBlur::new(self.sigma, self.metal_kernel_size) {
                     Ok(metal_blur) => {
                         match metal_blur.blur_to_bytes(&bytes, width, height, Some(self.sigma)) {
@@ -864,7 +880,11 @@ pub fn pixels_to_image(pixels: &[Vec<Pixel>]) -> image::RgbaImage {
     for y in 0..height {
         for x in 0..width {
             let pixel = pixels[y][x];
-            img.put_pixel(x as u32, y as u32, image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a]));
+            img.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a]),
+            );
         }
     }
 
@@ -895,9 +915,21 @@ mod tests {
     fn test_gaussian_blur() {
         // Create a simple 3x3 test image
         let image = vec![
-            vec![Pixel::rgb(255, 0, 0), Pixel::rgb(255, 0, 0), Pixel::rgb(255, 0, 0)],
-            vec![Pixel::rgb(255, 0, 0), Pixel::rgb(255, 0, 0), Pixel::rgb(255, 0, 0)],
-            vec![Pixel::rgb(255, 0, 0), Pixel::rgb(255, 0, 0), Pixel::rgb(255, 0, 0)],
+            vec![
+                Pixel::rgb(255, 0, 0),
+                Pixel::rgb(255, 0, 0),
+                Pixel::rgb(255, 0, 0),
+            ],
+            vec![
+                Pixel::rgb(255, 0, 0),
+                Pixel::rgb(255, 0, 0),
+                Pixel::rgb(255, 0, 0),
+            ],
+            vec![
+                Pixel::rgb(255, 0, 0),
+                Pixel::rgb(255, 0, 0),
+                Pixel::rgb(255, 0, 0),
+            ],
         ];
 
         // Test scalar version
@@ -932,9 +964,21 @@ mod tests {
     #[test]
     fn test_fast_blurs() {
         let image = vec![
-            vec![Pixel::rgb(255, 0, 0), Pixel::rgb(0, 255, 0), Pixel::rgb(0, 0, 255)],
-            vec![Pixel::rgb(255, 255, 0), Pixel::rgb(255, 0, 255), Pixel::rgb(0, 255, 255)],
-            vec![Pixel::rgb(128, 128, 128), Pixel::rgb(64, 64, 64), Pixel::rgb(192, 192, 192)],
+            vec![
+                Pixel::rgb(255, 0, 0),
+                Pixel::rgb(0, 255, 0),
+                Pixel::rgb(0, 0, 255),
+            ],
+            vec![
+                Pixel::rgb(255, 255, 0),
+                Pixel::rgb(255, 0, 255),
+                Pixel::rgb(0, 255, 255),
+            ],
+            vec![
+                Pixel::rgb(128, 128, 128),
+                Pixel::rgb(64, 64, 64),
+                Pixel::rgb(192, 192, 192),
+            ],
         ];
 
         // Test 3x3 blur
@@ -950,7 +994,7 @@ mod tests {
         // 5x5 should be more blurred than 3x3
         let center_3x3 = blurred_3x3[1][1];
         let center_5x5 = blurred_5x5[1][1];
-        
+
         // 5x5 blur should have colors more mixed (less extreme values)
         let diff_3x3 = (center_3x3.r as i32 - center_3x3.g as i32).abs();
         let diff_5x5 = (center_5x5.r as i32 - center_5x5.g as i32).abs();
