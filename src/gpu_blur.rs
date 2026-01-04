@@ -641,10 +641,17 @@ impl GpuGaussianBlur {
                 @group(0) @binding(0)
                 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
-                @compute @workgroup_size(8, 8, 1)
+                @compute @workgroup_size(16, 16)
                 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let x = global_id.x;
                     let y = global_id.y;
+                    let width = 16u;
+                    let height = 16u;
+                    
+                    // Check bounds
+                    if (x >= width || y >= height) {
+                        return;
+                    }
                     
                     // Write gradient pattern
                     let r = f32(x % 256u) / 255.0;
@@ -719,9 +726,9 @@ impl GpuGaussianBlur {
             compute_pass.set_pipeline(&test_pipeline);
             compute_pass.set_bind_group(0, &test_bind_group, &[]);
 
-            // Dispatch enough workgroups to cover the entire image
-            let dispatch_x = (width as u32 + 7) / 8;
-            let dispatch_y = (height as u32 + 7) / 8;
+            // Dispatch in 2D
+            let dispatch_x = (width as u32 + 15) / 16; // Ceiling division
+            let dispatch_y = (height as u32 + 15) / 16; // Ceiling division
             println!("Test dispatch: {}x{} workgroups", dispatch_x, dispatch_y);
             compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
@@ -979,7 +986,7 @@ impl GpuGaussianBlur {
             // Copy texture to buffer - USE THE ACTUAL OUTPUT TEXTURE
             final_encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &output_texture, // CHANGED: Use output_texture from blur operation
+                    texture: &output_texture, // Use output_texture from blur operation
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -1105,6 +1112,39 @@ impl GpuGaussianBlur {
                 println!("  3. Dispatch size doesn't cover image");
                 println!("  4. Coordinate clamping issues in shader");
             }
+
+            // Add detailed row analysis
+            println!("\n=== Detailed Pixel Analysis ===");
+            let mut zero_rows = 0;
+            let mut non_zero_rows = 0;
+
+            for y in 0..height.min(10) {
+                // Check first 10 rows
+                let mut row_all_zero = true;
+                for x in 0..width.min(10) {
+                    // Check first 10 columns
+                    let offset = (y * width + x) * 4;
+                    if offset + 3 < result_bytes.len() {
+                        if result_bytes[offset] != 0
+                            || result_bytes[offset + 1] != 0
+                            || result_bytes[offset + 2] != 0
+                            || result_bytes[offset + 3] != 0
+                        {
+                            row_all_zero = false;
+                            break;
+                        }
+                    }
+                }
+                if row_all_zero {
+                    zero_rows += 1;
+                } else {
+                    non_zero_rows += 1;
+                }
+            }
+            println!(
+                "First 10 rows: {} all-zero, {} have pixels",
+                zero_rows, non_zero_rows
+            );
 
             // Cleanup - data is automatically unmapped when dropped
             drop(data);
@@ -1242,9 +1282,13 @@ impl GpuGaussianBlur {
             compute_pass.set_pipeline(&self.gaussian_blur_pipeline);
             compute_pass.set_bind_group(0, &horiz_bind_group, &[]);
 
-            // Dispatch one workgroup per row for horizontal blur
-            let dispatch_x = (width as u32 + 255) / 256;
-            let dispatch_y = height as u32;
+            // Use 2D dispatch
+            let dispatch_x = (width as u32 + 15) / 16; // Ceiling division
+            let dispatch_y = (height as u32 + 15) / 16; // Ceiling division
+            println!(
+                "Horizontal dispatch: {}x{} workgroups (2D)",
+                dispatch_x, dispatch_y
+            );
             compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
@@ -1312,9 +1356,13 @@ impl GpuGaussianBlur {
             compute_pass.set_pipeline(&self.gaussian_blur_pipeline);
             compute_pass.set_bind_group(0, &vert_bind_group, &[]);
 
-            // Dispatch one workgroup per column for vertical blur
-            let dispatch_x = width as u32;
-            let dispatch_y = (height as u32 + 255) / 256;
+            // Use 2D dispatch for vertical pass too
+            let dispatch_x = (width as u32 + 15) / 16;
+            let dispatch_y = (height as u32 + 15) / 16;
+            println!(
+                "Vertical dispatch: {}x{} workgroups (2D)",
+                dispatch_x, dispatch_y
+            );
             compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
@@ -1462,18 +1510,10 @@ impl GpuGaussianBlur {
                 compute_pass.set_pipeline(&self.box_blur_pipeline);
                 compute_pass.set_bind_group(0, &bind_group, &[]);
 
-                // Dispatch based on direction
-                if *direction == 0 {
-                    // Horizontal blur: one workgroup per row
-                    let dispatch_x = (width as u32 + 255) / 256;
-                    let dispatch_y = height as u32;
-                    compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-                } else {
-                    // Vertical blur: one workgroup per column
-                    let dispatch_x = width as u32;
-                    let dispatch_y = (height as u32 + 255) / 256;
-                    compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-                }
+                // Use 2D dispatch
+                let dispatch_x = (width as u32 + 15) / 16;
+                let dispatch_y = (height as u32 + 15) / 16;
+                compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
             }
 
             self.queue.submit(Some(encoder.finish()));
@@ -1584,9 +1624,9 @@ impl GpuGaussianBlur {
             compute_pass.set_pipeline(&self.downsample_pipeline);
             compute_pass.set_bind_group(0, &down_bind_group, &[]);
 
-            // Dispatch one workgroup per 8x8 block of downsampled image
-            let dispatch_x = (down_width + 7) / 8;
-            let dispatch_y = (down_height + 7) / 8;
+            // Use 2D dispatch for downsample
+            let dispatch_x = (down_width + 15) / 16;
+            let dispatch_y = (down_height + 15) / 16;
             println!(
                 "Downsample dispatch: {}x{} workgroups",
                 dispatch_x, dispatch_y
@@ -1730,18 +1770,10 @@ impl GpuGaussianBlur {
                 compute_pass.set_pipeline(&self.box_blur_pipeline);
                 compute_pass.set_bind_group(0, &bind_group, &[]);
 
-                // Dispatch based on direction
-                if *direction == 0 {
-                    // Horizontal blur
-                    let dispatch_x = (down_width + 255) / 256;
-                    let dispatch_y = down_height;
-                    compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-                } else {
-                    // Vertical blur
-                    let dispatch_x = down_width;
-                    let dispatch_y = (down_height + 255) / 256;
-                    compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-                }
+                // Use 2D dispatch
+                let dispatch_x = (down_width + 15) / 16;
+                let dispatch_y = (down_height + 15) / 16;
+                compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
             }
 
             self.queue.submit(Some(encoder.finish()));
@@ -1827,9 +1859,9 @@ impl GpuGaussianBlur {
             compute_pass.set_pipeline(&self.upsample_pipeline);
             compute_pass.set_bind_group(0, &up_bind_group, &[]);
 
-            // Dispatch one workgroup per 8x8 block of output image
-            let dispatch_x = (width as u32 + 7) / 8;
-            let dispatch_y = (height as u32 + 7) / 8;
+            // Use 2D dispatch for upsample
+            let dispatch_x = (width as u32 + 15) / 16;
+            let dispatch_y = (height as u32 + 15) / 16;
             println!(
                 "Upsample dispatch: {}x{} workgroups",
                 dispatch_x, dispatch_y

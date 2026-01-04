@@ -25,18 +25,18 @@ var<uniform> params: ShaderParameters;
 @group(0) @binding(3)
 var<uniform> gaussian_weights: array<vec4<f32>, 256>;
 
-@compute @workgroup_size(256, 1, 1)
+@compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    // CRITICAL: Check bounds
+    if x >= params.width || y >= params.height {
+        return;
+    }
 
     if params.direction == 0u {
         // HORIZONTAL BLUR
-        let x = global_id.x;
-        let y = global_id.y;
-
-        if x >= params.width || y >= params.height {
-            return;
-        }
-
         let radius = i32(params.radius);
         var sum = vec4<f32>(0.0);
         var weight_sum = 0.0;
@@ -44,13 +44,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var k = -radius; k <= radius; k++) {
             let sample_x = clamp(i32(x) + k, 0, i32(params.width) - 1);
             let weight_idx = u32(k + radius);
-            
+
             // Extract weight from vec4 array (packed 4 weights per vec4)
             let vec4_idx = weight_idx / 4u;
             let component_idx = weight_idx % 4u;
             let weight_vec = gaussian_weights[vec4_idx];
             var weight: f32;
-            
+
             // Get the correct component
             if component_idx == 0u {
                 weight = weight_vec.x;
@@ -72,7 +72,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         } else {
             result = vec4<f32>(0.0);
         }
-        
+
         // Preserve alpha if needed
         if params.blur_alpha == 0u {
             let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
@@ -82,13 +82,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
     } else {
         // VERTICAL BLUR
-        let x = global_id.x;
-        let y = global_id.y;
-
-        if x >= params.width || y >= params.height {
-            return;
-        }
-
         let radius = i32(params.radius);
         var sum = vec4<f32>(0.0);
         var weight_sum = 0.0;
@@ -96,13 +89,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var k = -radius; k <= radius; k++) {
             let sample_y = clamp(i32(y) + k, 0, i32(params.height) - 1);
             let weight_idx = u32(k + radius);
-            
+
             // Extract weight from vec4 array (packed 4 weights per vec4)
             let vec4_idx = weight_idx / 4u;
             let component_idx = weight_idx % 4u;
             let weight_vec = gaussian_weights[vec4_idx];
             var weight: f32;
-            
+
             // Get the correct component
             if component_idx == 0u {
                 weight = weight_vec.x;
@@ -124,7 +117,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         } else {
             result = vec4<f32>(0.0);
         }
-        
+
         // Preserve alpha if needed
         if params.blur_alpha == 0u {
             let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);

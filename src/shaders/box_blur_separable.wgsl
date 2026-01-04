@@ -18,7 +18,7 @@ var output_texture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2)
 var<uniform> params: ShaderParameters;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
@@ -52,7 +52,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var result = sum / count;
-    
+
     // Preserve alpha if needed
     if params.blur_alpha == 0u {
         let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);

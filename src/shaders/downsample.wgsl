@@ -17,20 +17,20 @@ var output_texture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2)
 var<uniform> params: ShaderParameters;
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dst_x = global_id.x;
     let dst_y = global_id.y;
     
-    // Check bounds
+    // CRITICAL: Check bounds
     if dst_x >= params.dst_width || dst_y >= params.dst_height {
         return;
     }
-    
+
     // Map to source coordinates (2x2 average)
     let src_x = dst_x * 2u;
     let src_y = dst_y * 2u;
-    
+
     // Sample 2x2 block
     var sum = vec4<f32>(0.0);
     var count = 0.0;
