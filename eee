@@ -39,5 +39,10 @@ of "mipmap_filter: wgpu::FilterMode::Nearest,".
                     count: None,
                 },
 
+8. In WGSL, you need to explicitly convert between types. The errors 
+are complaining about implicit conversions from u32 to i32 - this
+doesn't work implicitly.
+
+9. WGSL doesn't have ternary operator!
 
 

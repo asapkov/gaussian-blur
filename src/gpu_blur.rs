@@ -50,6 +50,9 @@ const ROW_ALIGNMENT: u32 = 256;
 /// Bytes per pixel (RGBA)
 const BYTES_PER_PIXEL: u32 = 4;
 
+/// Threshold for using small radius optimized shader
+const SMALL_RADIUS_THRESHOLD: u32 = 8;
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -321,6 +324,8 @@ pub struct GpuGaussianBlur {
     #[cfg(feature = "gpu")]
     box_blur_pipeline: ComputePipeline,
     #[cfg(feature = "gpu")]
+    box_blur_small_pipeline: ComputePipeline,
+    #[cfg(feature = "gpu")]
     gaussian_blur_pipeline: ComputePipeline,
 
     #[cfg(feature = "gpu")]
@@ -339,6 +344,7 @@ pub struct GpuGaussianBlur {
     radius: i32,
     blur_alpha: bool,
     strategy: BlurStrategy,
+    use_small_radius_shader: bool,
 }
 
 impl GpuGaussianBlur {
@@ -359,6 +365,7 @@ impl GpuGaussianBlur {
 
             let radius = radius.unwrap_or_else(|| (3.0 * sigma).ceil() as i32);
             let strategy = Self::select_strategy(sigma);
+            let use_small_radius_shader = radius as u32 <= SMALL_RADIUS_THRESHOLD;
 
             let (device, queue, pipelines, layouts, sampler) = Self::initialize_gpu()
                 .await
@@ -370,7 +377,8 @@ impl GpuGaussianBlur {
                 downsample_pipeline: pipelines.0,
                 upsample_pipeline: pipelines.1,
                 box_blur_pipeline: pipelines.2,
-                gaussian_blur_pipeline: pipelines.3,
+                box_blur_small_pipeline: pipelines.3,
+                gaussian_blur_pipeline: pipelines.4,
                 downsample_bind_group_layout: layouts.0,
                 upsample_bind_group_layout: layouts.1,
                 box_blur_bind_group_layout: layouts.2,
@@ -380,6 +388,7 @@ impl GpuGaussianBlur {
                 radius,
                 blur_alpha,
                 strategy,
+                use_small_radius_shader,
             })
         }
     }
@@ -489,16 +498,17 @@ impl GpuGaussianBlur {
             Device,
             Queue,
             (
-                ComputePipeline,
-                ComputePipeline,
-                ComputePipeline,
-                ComputePipeline,
+                ComputePipeline, // downsample
+                ComputePipeline, // upsample
+                ComputePipeline, // box_blur (optimized with shared memory)
+                ComputePipeline, // box_blur_small (unrolled for small radii)
+                ComputePipeline, // gaussian (optimized with shared memory)
             ),
             (
-                BindGroupLayout,
-                BindGroupLayout,
-                BindGroupLayout,
-                BindGroupLayout,
+                BindGroupLayout, // downsample
+                BindGroupLayout, // upsample
+                BindGroupLayout, // box_blur
+                BindGroupLayout, // gaussian
             ),
             wgpu::Sampler,
         ),
@@ -550,12 +560,19 @@ impl GpuGaussianBlur {
 
         let box_blur_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Box Blur Shader"),
-            source: ShaderSource::Wgsl(include_str!("shaders/box_blur_separable.wgsl").into()),
+            source: ShaderSource::Wgsl(
+                include_str!("shaders/box_blur_separable_optimized.wgsl").into(),
+            ),
+        });
+
+        let box_blur_small_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Box Blur Small Radius Shader"),
+            source: ShaderSource::Wgsl(include_str!("shaders/box_blur_small_radius.wgsl").into()),
         });
 
         let gaussian_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Gaussian Blur Shader"),
-            source: ShaderSource::Wgsl(include_str!("shaders/gaussian_blur_separable.wgsl").into()),
+            source: ShaderSource::Wgsl(include_str!("shaders/gaussian_blur_optimized.wgsl").into()),
         });
 
         let downsample_entries = &[
@@ -714,6 +731,12 @@ impl GpuGaussianBlur {
             ),
             create_pipeline(&device, &upsample_layout, &upsample_shader, "Upsample"),
             create_pipeline(&device, &box_blur_layout, &box_blur_shader, "Box Blur"),
+            create_pipeline(
+                &device,
+                &box_blur_layout,
+                &box_blur_small_shader,
+                "Box Blur Small",
+            ),
             create_pipeline(&device, &gaussian_layout, &gaussian_shader, "Gaussian"),
         );
 
@@ -1212,7 +1235,13 @@ impl GpuGaussianBlur {
                 timestamp_writes: None,
             });
 
-            compute_pass.set_pipeline(&self.box_blur_pipeline);
+            // Choose appropriate pipeline based on radius
+            if *radius <= SMALL_RADIUS_THRESHOLD && self.use_small_radius_shader {
+                compute_pass.set_pipeline(&self.box_blur_small_pipeline);
+            } else {
+                compute_pass.set_pipeline(&self.box_blur_pipeline);
+            }
+
             compute_pass.set_bind_group(0, &bind_group, &[]);
             let (dispatch_x, dispatch_y) = calculate_dispatch(width_u32, height_u32);
             compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
@@ -1359,7 +1388,13 @@ impl GpuGaussianBlur {
                     timestamp_writes: None,
                 });
 
-                compute_pass.set_pipeline(&self.box_blur_pipeline);
+                // Choose appropriate pipeline for downsampled blur
+                if *radius <= SMALL_RADIUS_THRESHOLD {
+                    compute_pass.set_pipeline(&self.box_blur_small_pipeline);
+                } else {
+                    compute_pass.set_pipeline(&self.box_blur_pipeline);
+                }
+
                 compute_pass.set_bind_group(0, &bind_group, &[]);
                 let (dispatch_x, dispatch_y) = calculate_dispatch(down_width, down_height);
                 compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
