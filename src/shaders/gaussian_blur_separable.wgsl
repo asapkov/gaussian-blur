@@ -1,4 +1,4 @@
-// True separable Gaussian blur with precomputed weights
+// True separable Gaussian blur with precomputed weights and dithering
 // Uses vec4<f32> array for proper 16-byte alignment
 
 struct GaussianBlurParams {
@@ -26,6 +26,12 @@ var<uniform> params: GaussianBlurParams;
 @group(0) @binding(3)
 var<uniform> gaussian_weights: GaussianWeights;
 
+// Simple pseudo-random hash for dithering
+fn hash12(p: vec2<f32>) -> f32 {
+    var h = dot(p, vec2<f32>(127.1, 311.7));
+    return fract(sin(h) * 43758.5453123);
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
@@ -36,6 +42,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     if params.direction == 0u {
+        // HORIZONTAL BLUR
         let radius = i32(params.radius);
         var sum = vec4<f32>(0.0);
         var weight_sum = 0.0;
@@ -70,13 +77,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             result = vec4<f32>(0.0);
         }
 
+        // Add subtle dithering to reduce banding
+        let dither = hash12(vec2<f32>(f32(x), f32(y))) * 0.0039; // 1/256
+        
+        // Preserve alpha if needed
         if params.blur_alpha == 0u {
             let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
-            result.a = original.a;
+            result = vec4<f32>(result.rgb + vec3<f32>(dither), original.a);
+        } else {
+            result = vec4<f32>(result.rgb + vec3<f32>(dither), result.a);
         }
 
         textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
     } else {
+        // VERTICAL BLUR
         let radius = i32(params.radius);
         var sum = vec4<f32>(0.0);
         var weight_sum = 0.0;
@@ -111,9 +125,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             result = vec4<f32>(0.0);
         }
 
+        // Add subtle dithering to reduce banding
+        let dither = hash12(vec2<f32>(f32(x), f32(y))) * 0.0039; // 1/256
+        
+        // Preserve alpha if needed
         if params.blur_alpha == 0u {
             let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
-            result.a = original.a;
+            result = vec4<f32>(result.rgb + vec3<f32>(dither), original.a);
+        } else {
+            result = vec4<f32>(result.rgb + vec3<f32>(dither), result.a);
         }
 
         textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);

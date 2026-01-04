@@ -27,10 +27,10 @@ use crate::Pixel;
 // ============================================================================
 
 /// Sigma threshold for using true Gaussian convolution
-const GAUSSIAN_THRESHOLD: f32 = 2.0;
+const GAUSSIAN_THRESHOLD: f32 = 1.0; // CHANGED FROM 2.0 TO 1.0
 
 /// Sigma threshold for using box blur approximation vs downsampling
-const DOWNSAMPLE_THRESHOLD: f32 = 5.0;
+const DOWNSAMPLE_THRESHOLD: f32 = 32.0; // CHANGED FROM 5.0 BACK TO 32.0
 
 /// Sigma threshold for using 8x vs 4x downsampling
 const LARGE_SIGMA_THRESHOLD: f32 = 100.0;
