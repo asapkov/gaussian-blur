@@ -66,6 +66,7 @@ pub enum BlurError {
     InvalidSigma(f32),
     GpuFeatureDisabled,
     BufferError(String),
+    Timeout(String),
 }
 
 impl std::fmt::Display for BlurError {
@@ -85,6 +86,7 @@ impl std::fmt::Display for BlurError {
                 write!(f, "GPU feature not enabled. Build with --features gpu")
             }
             BlurError::BufferError(msg) => write!(f, "Buffer operation failed: {}", msg),
+            BlurError::Timeout(msg) => write!(f, "Operation timed out: {}", msg),
         }
     }
 }
@@ -356,7 +358,7 @@ fn calculate_downsampled_dimensions(width: usize, height: usize, factor: u32) ->
     (down_width, down_height)
 }
 
-/// Convert image to flat RGBA bytes
+/// Convert image to flat RGBA bytes (no padding)
 fn image_to_rgba_bytes(image: &[Vec<Pixel>], width: usize, height: usize) -> Vec<u8> {
     let mut rgba_data = Vec::with_capacity(width * height * 4);
     for row in image {
@@ -437,10 +439,10 @@ impl GpuGaussianBlur {
             Ok(Self {
                 device,
                 queue,
-                downsample_pipeline: pipelines.0, // First tuple element
-                upsample_pipeline: pipelines.1,   // Second tuple element
-                box_blur_pipeline: pipelines.2,   // Third tuple element
-                gaussian_blur_pipeline: pipelines.3, // Fourth tuple element
+                downsample_pipeline: pipelines.0,
+                upsample_pipeline: pipelines.1,
+                box_blur_pipeline: pipelines.2,
+                gaussian_blur_pipeline: pipelines.3,
                 downsample_bind_group_layout: layouts.0,
                 upsample_bind_group_layout: layouts.1,
                 box_blur_bind_group_layout: layouts.2,
@@ -454,7 +456,7 @@ impl GpuGaussianBlur {
     }
 
     /// Apply blur to an image and return as 2D pixel array
-    pub fn blur(&self, image: &[Vec<Pixel>]) -> Result<Vec<Vec<Pixel>>, String> {
+    pub fn blur(&self, image: &[Vec<Pixel>]) -> Result<Vec<Vec<Pixel>>, BlurError> {
         let (bytes, width, height) = self.blur_to_bytes(image)?;
 
         if width == 0 || height == 0 {
@@ -482,9 +484,12 @@ impl GpuGaussianBlur {
     }
 
     /// Apply blur to an image using GPU with optimal strategy
-    pub fn blur_to_bytes(&self, image: &[Vec<Pixel>]) -> Result<(Vec<u8>, usize, usize), String> {
+    pub fn blur_to_bytes(
+        &self,
+        image: &[Vec<Pixel>],
+    ) -> Result<(Vec<u8>, usize, usize), BlurError> {
         #[cfg(not(feature = "gpu"))]
-        return Err(BlurError::GpuFeatureDisabled.to_string());
+        return Err(BlurError::GpuFeatureDisabled);
 
         #[cfg(feature = "gpu")]
         {
@@ -497,36 +502,30 @@ impl GpuGaussianBlur {
             let width = image[0].len();
 
             // Check GPU limits
-            Self::validate_image_dimensions(&self.device, width, height)
-                .map_err(|e| e.to_string())?;
+            Self::validate_image_dimensions(&self.device, width, height)?;
 
             // Upload image to GPU
-            let input_texture = self
-                .upload_image_to_gpu(image, width, height)
-                .map_err(|e| e.to_string())?;
+            let input_texture = self.upload_image_to_gpu(image, width, height)?;
 
             // Execute selected strategy
             let output_texture = match &self.strategy {
-                BlurStrategy::Gaussian => self
-                    .apply_gaussian_blur(&input_texture.view, width, height)
-                    .map_err(|e| e.to_string())?,
-                BlurStrategy::Box3Pass => self
-                    .apply_box_blur_3pass(&input_texture.view, width, height)
-                    .map_err(|e| e.to_string())?,
-                BlurStrategy::Downsample(config) => self
-                    .apply_downsample_blur_upsample(
-                        &input_texture.view,
-                        width,
-                        height,
-                        config.factor,
-                        config.adjusted_sigma,
-                    )
-                    .map_err(|e| e.to_string())?,
+                BlurStrategy::Gaussian => {
+                    self.apply_gaussian_blur(&input_texture.view, width, height)?
+                }
+                BlurStrategy::Box3Pass => {
+                    self.apply_box_blur_3pass(&input_texture.view, width, height)?
+                }
+                BlurStrategy::Downsample(config) => self.apply_downsample_blur_upsample(
+                    &input_texture.view,
+                    width,
+                    height,
+                    config.factor,
+                    config.adjusted_sigma,
+                )?,
             };
 
             // Download result from GPU
             self.download_texture_to_cpu(&output_texture.texture, width, height)
-                .map_err(|e| e.to_string())
         }
     }
 
@@ -584,7 +583,6 @@ impl GpuGaussianBlur {
     > {
         let instance = Instance::default();
 
-        // request_adapter returns Result<Adapter, RequestAdapterError>
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -594,7 +592,7 @@ impl GpuGaussianBlur {
             .await
             .map_err(|e| format!("Failed to find a suitable GPU adapter: {}", e))?;
 
-        let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
+        let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Gaussian Blur Device"),
                 required_features: wgpu::Features::empty(),
@@ -767,16 +765,34 @@ impl GpuGaussianBlur {
         width: usize,
         height: usize,
     ) -> Result<GpuTexture, BlurError> {
-        // Convert image to flat RGBA bytes
-        let rgba_data = image_to_rgba_bytes(image, width, height);
+        let bytes_per_row_unaligned = BYTES_PER_PIXEL * width as u32;
+        let bytes_per_row_aligned = calculate_aligned_row_size(width);
+
+        // Calculate total size with padding
+        let total_size = (bytes_per_row_aligned as usize) * height;
+        let mut padded_data = vec![0u8; total_size];
+
+        // Copy and pad each row
+        for y in 0..height {
+            let dst_start = y * bytes_per_row_aligned as usize;
+
+            // Copy row data
+            for x in 0..width {
+                let pixel = &image[y][x];
+                let dst_offset = dst_start + x * BYTES_PER_PIXEL as usize;
+                padded_data[dst_offset] = pixel.r;
+                padded_data[dst_offset + 1] = pixel.g;
+                padded_data[dst_offset + 2] = pixel.b;
+                padded_data[dst_offset + 3] = pixel.a;
+            }
+            // Remainder of row is already 0-filled from vec initialization
+        }
 
         // Create input texture
         let input_texture =
             GpuTexture::new_readable(&self.device, width as u32, height as u32, "Input Texture");
 
-        // Write image data to texture
-        let bytes_per_row_aligned = calculate_aligned_row_size(width);
-
+        // Write padded image data to texture
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &input_texture.texture,
@@ -784,7 +800,7 @@ impl GpuGaussianBlur {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba_data,
+            &padded_data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row_aligned),
@@ -809,10 +825,13 @@ impl GpuGaussianBlur {
     ) -> Result<(Vec<u8>, usize, usize), BlurError> {
         let bytes_per_row_aligned = calculate_aligned_row_size(width);
 
-        // Create staging buffer with exact size needed
+        // Calculate correct buffer size with padding
+        let buffer_size = (bytes_per_row_aligned as u64) * (height as u64);
+
+        // Create staging buffer with correct size
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging Buffer"),
-            size: (width * height * BYTES_PER_PIXEL as usize) as wgpu::BufferAddress,
+            size: buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -823,7 +842,7 @@ impl GpuGaussianBlur {
                 label: Some("Download Encoder"),
             });
 
-        // Copy from texture to staging buffer with proper row alignment
+        // Copy from texture to staging buffer
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -847,14 +866,16 @@ impl GpuGaussianBlur {
         );
 
         self.queue.submit(Some(encoder.finish()));
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
 
-        // Read data directly from staging buffer
-        Self::read_staging_buffer(&self.device, &staging_buffer, width, height)
-            .map(|bytes| (bytes, width, height))
+        // Read data from staging buffer
+        Self::read_staging_buffer(
+            &self.device,
+            &staging_buffer,
+            width,
+            height,
+            bytes_per_row_aligned,
+        )
+        .map(|bytes| (bytes, width, height))
     }
 
     // ============================================================================
@@ -1397,50 +1418,62 @@ impl GpuGaussianBlur {
         weights_data
     }
 
-    /// Read staging buffer contents with simplified pattern
+    /// Read staging buffer contents with proper async handling
     #[cfg(feature = "gpu")]
     fn read_staging_buffer(
         device: &Device,
         buffer: &Buffer,
         width: usize,
         height: usize,
+        bytes_per_row_aligned: u32,
     ) -> Result<Vec<u8>, BlurError> {
         let buffer_slice = buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Use a sync channel with timeout for better async handling
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
 
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
 
-        let _ = device.poll(wgpu::PollType::Wait {
+        // Poll until the mapping is complete
+        device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
 
-        // Wait for mapping to complete
+        // Wait for the mapping callback with timeout
         receiver
-            .recv()
-            .map_err(|e| {
-                BlurError::BufferError(format!("Failed to receive buffer mapping result: {}", e))
-            })?
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| BlurError::Timeout(format!("Timeout waiting for buffer: {}", e)))?
             .map_err(|e| BlurError::BufferError(format!("Failed to map buffer: {}", e)))?;
 
         // Get the mapped data
         let data = buffer_slice.get_mapped_range();
 
-        // Copy data directly - staging buffer already has exact size
-        let result_bytes = data.to_vec();
+        // Extract actual image data (remove padding)
+        let row_size = width * BYTES_PER_PIXEL as usize;
+        let mut result = Vec::with_capacity(row_size * height);
+
+        for y in 0..height {
+            let row_start = y * bytes_per_row_aligned as usize;
+            result.extend_from_slice(&data[row_start..row_start + row_size]);
+        }
+
+        // Unmap the buffer
+        drop(data);
+        buffer.unmap();
 
         // Verify size matches expectations
         let expected_bytes = width * height * BYTES_PER_PIXEL as usize;
-        if result_bytes.len() != expected_bytes {
+        if result.len() != expected_bytes {
             return Err(BlurError::BufferError(format!(
                 "Buffer size mismatch: expected {} bytes, got {}",
                 expected_bytes,
-                result_bytes.len()
+                result.len()
             )));
         }
 
-        Ok(result_bytes)
+        Ok(result)
     }
 }

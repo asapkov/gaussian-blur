@@ -757,11 +757,8 @@ impl UnifiedGaussianBlur {
                 // GPU backend - try to use GPU, fall back to CPU if it fails
                 let future = async {
                     match GpuGaussianBlur::new(self.sigma, self.radius, self.blur_alpha).await {
-                        Ok(gpu_blur) => {
-                            // blur_to_bytes now returns Result<_, String>
-                            gpu_blur.blur_to_bytes(image)
-                        }
-                        Err(e) => Err(format!("Failed to create GPU blur: {}", e)),
+                        Ok(gpu_blur) => gpu_blur.blur_to_bytes(image),
+                        Err(e) => Err(e), // Just pass through the error
                     }
                 };
 
