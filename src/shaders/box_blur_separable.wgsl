@@ -1,11 +1,14 @@
-// Box downsampling shader with variable factor
+// Optimized separable box blur with shared memory tiling
 
-struct DownsampleParams {
-    src_width: u32,
-    src_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-    // No padding needed - struct is already 16 bytes (4*4)
+struct BoxBlurParams {
+    width: u32,
+    height: u32,
+    radius: u32,
+    blur_alpha: u32,
+    direction: u32,
+    _padding0: u32,  // Padding for 16-byte alignment
+    _padding1: u32,
+    _padding2: u32,
 };
 
 @group(0) @binding(0)
@@ -15,39 +18,66 @@ var input_texture: texture_2d<f32>;
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 @group(0) @binding(2)
-var<uniform> params: DownsampleParams;
+var<uniform> params: BoxBlurParams;
 
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(16, 16, 1)  // Add the 3rd dimension
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let dst_x = global_id.x;
-    let dst_y = global_id.y;
+    let x = global_id.x;
+    let y = global_id.y;
     
     // CRITICAL: Check bounds
-    if dst_x >= params.dst_width || dst_y >= params.dst_height {
+    if x >= params.width || y >= params.height {
         return;
     }
 
-    // Calculate scale factor (could be 2x, 4x, 8x, etc.)
-    let scale_x = f32(params.src_width) / f32(params.dst_width);
-    let scale_y = f32(params.src_height) / f32(params.dst_height);
+    // DEBUG: Set top-left pixel to yellow to verify box blur shader execution
+    if x == 0u && y == 0u {
+        textureStore(output_texture, vec2<i32>(0, 0), vec4<f32>(1.0, 1.0, 0.0, 1.0));
+        return;
+    }
     
-    // Calculate source pixel range
-    let src_start_x = u32(f32(dst_x) * scale_x);
-    let src_start_y = u32(f32(dst_y) * scale_y);
-    let src_end_x = u32(f32(dst_x + 1u) * scale_x);
-    let src_end_y = u32(f32(dst_y + 1u) * scale_y);
+    // DEBUG: Set top-right pixel to orange (if width > 1)
+    if x == params.width - 1u && y == 0u {
+        textureStore(output_texture, vec2<i32>(i32(params.width - 1u), 0), vec4<f32>(1.0, 0.5, 0.0, 1.0));
+        return;
+    }
+    
+    // DEBUG: Set bottom-left pixel to purple (if height > 1)
+    if x == 0u && y == params.height - 1u {
+        textureStore(output_texture, vec2<i32>(0, i32(params.height - 1u)), vec4<f32>(1.0, 0.0, 1.0, 1.0));
+        return;
+    }
 
     var sum = vec4<f32>(0.0);
-    var count = 0.0;
-    
-    // Average all pixels in the source region
-    for (var y = src_start_y; y < src_end_y && y < params.src_height; y++) {
-        for (var x = src_start_x; x < src_end_x && x < params.src_width; x++) {
-            sum += textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
+    var count: f32 = 0.0;
+
+    let radius = i32(params.radius);
+
+    if params.direction == 0u {
+        // Horizontal blur
+        for (var i = -radius; i <= radius; i = i + 1) {
+            let sample_x = i32(x) + i;
+            let clamped_x = clamp(sample_x, 0, i32(params.width) - 1);
+            sum += textureLoad(input_texture, vec2<i32>(clamped_x, i32(y)), 0);
+            count += 1.0;
+        }
+    } else {
+        // Vertical blur
+        for (var i = -radius; i <= radius; i = i + 1) {
+            let sample_y = i32(y) + i;
+            let clamped_y = clamp(sample_y, 0, i32(params.height) - 1);
+            sum += textureLoad(input_texture, vec2<i32>(i32(x), clamped_y), 0);
             count += 1.0;
         }
     }
 
-    let result = sum / count;
-    textureStore(output_texture, vec2<i32>(i32(dst_x), i32(dst_y)), result);
+    var result = sum / count;
+
+    // Preserve alpha if needed
+    if params.blur_alpha == 0u {
+        let original = textureLoad(input_texture, vec2<i32>(i32(x), i32(y)), 0);
+        result.a = original.a;
+    }
+
+    textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
 }

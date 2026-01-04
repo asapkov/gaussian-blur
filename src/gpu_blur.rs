@@ -119,9 +119,9 @@ struct UpsampleParams {
     dst_height: u32,
 }
 
-/// Parameters for box blur shader
+/// Parameters for box blur shader - MUST MATCH SHADER STRUCT SIZE
 #[cfg(feature = "gpu")]
-#[repr(C)]
+#[repr(C, align(16))] // Align to 16 bytes for WGSL compatibility
 #[derive(Debug, Clone, Copy)]
 struct BoxBlurParams {
     width: u32,
@@ -129,11 +129,14 @@ struct BoxBlurParams {
     radius: u32,
     blur_alpha: u32,
     direction: u32,
+    _padding0: u32, // Padding to make 32 bytes
+    _padding1: u32,
+    _padding2: u32,
 }
 
 /// Parameters for Gaussian blur shader
 #[cfg(feature = "gpu")]
-#[repr(C)]
+#[repr(C, align(16))] // Align to 16 bytes for WGSL compatibility
 #[derive(Debug, Clone, Copy)]
 struct GaussianBlurParams {
     width: u32,
@@ -142,6 +145,7 @@ struct GaussianBlurParams {
     blur_alpha: u32,
     direction: u32,
     sigma: f32,
+    _padding0: u32, // Padding to make 32 bytes
 }
 
 /// Gaussian kernel weights packed into vec4<f32> arrays (256 vec4s = 1024 weights)
@@ -330,6 +334,9 @@ pub struct GpuGaussianBlur {
     #[cfg(feature = "gpu")]
     gaussian_blur_bind_group_layout: BindGroupLayout,
 
+    #[cfg(feature = "gpu")]
+    sampler: wgpu::Sampler,
+
     sigma: f32,
     radius: i32,
     blur_alpha: bool,
@@ -363,7 +370,7 @@ impl GpuGaussianBlur {
             eprintln!("[INIT] Selected strategy: {:?}", strategy);
             eprintln!("[INIT] Using radius: {}", radius);
 
-            let (device, queue, pipelines, layouts) = Self::initialize_gpu()
+            let (device, queue, pipelines, layouts, sampler) = Self::initialize_gpu()
                 .await
                 .map_err(|e| BlurError::GpuError(format!("Failed to initialize GPU: {}", e)))?;
 
@@ -380,6 +387,7 @@ impl GpuGaussianBlur {
                 upsample_bind_group_layout: layouts.1,
                 box_blur_bind_group_layout: layouts.2,
                 gaussian_blur_bind_group_layout: layouts.3,
+                sampler,
                 sigma,
                 radius,
                 blur_alpha,
@@ -559,6 +567,7 @@ impl GpuGaussianBlur {
                 BindGroupLayout, // box_blur
                 BindGroupLayout, // gaussian
             ),
+            wgpu::Sampler,
         ),
         String,
     > {
@@ -591,6 +600,18 @@ impl GpuGaussianBlur {
 
         eprintln!("[GPU] Device created successfully");
 
+        // Create sampler for upsampling
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Upsample Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
         // Load and compile all shaders
         eprintln!("[GPU] Loading shaders...");
 
@@ -616,8 +637,8 @@ impl GpuGaussianBlur {
 
         eprintln!("[GPU] Shaders loaded");
 
-        // Define common bind group layout entries
-        let common_entries = &[
+        // Define bind group layout entries for different pipelines
+        let downsample_entries = &[
             BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
@@ -650,29 +671,90 @@ impl GpuGaussianBlur {
             },
         ];
 
+        let upsample_entries = &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TEXTURE_FORMAT,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ];
+
         eprintln!("[GPU] Creating bind group layouts...");
 
         let downsample_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Downsample Bind Group Layout"),
-            entries: common_entries,
+            entries: downsample_entries,
         });
 
         let upsample_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Upsample Bind Group Layout"),
-            entries: common_entries,
+            entries: upsample_entries,
         });
 
         let box_blur_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Box Blur Bind Group Layout"),
-            entries: common_entries,
+            entries: &[
+                downsample_entries[0].clone(),
+                downsample_entries[1].clone(),
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let gaussian_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Gaussian Blur Bind Group Layout"),
             entries: &[
-                common_entries[0].clone(),
-                common_entries[1].clone(),
-                common_entries[2].clone(),
+                downsample_entries[0].clone(),
+                downsample_entries[1].clone(),
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -729,7 +811,7 @@ impl GpuGaussianBlur {
 
         eprintln!("[GPU] Initialization complete");
 
-        Ok((device, queue, pipelines, layouts))
+        Ok((device, queue, pipelines, layouts, sampler))
     }
 
     // ============================================================================
@@ -1127,6 +1209,7 @@ impl GpuGaussianBlur {
                 blur_alpha: self.blur_alpha as u32,
                 direction: 0,
                 sigma: self.sigma,
+                _padding0: 0,
             };
 
             let param_buffer = self.create_uniform_buffer(&params, "Gaussian Horizontal Params");
@@ -1179,6 +1262,7 @@ impl GpuGaussianBlur {
                 blur_alpha: self.blur_alpha as u32,
                 direction: 1,
                 sigma: self.sigma,
+                _padding0: 0,
             };
 
             let param_buffer = self.create_uniform_buffer(&params, "Gaussian Vertical Params");
@@ -1315,6 +1399,9 @@ impl GpuGaussianBlur {
                 radius: *radius,
                 blur_alpha: self.blur_alpha as u32,
                 direction: *direction,
+                _padding0: 0,
+                _padding1: 0,
+                _padding2: 0,
             };
 
             let param_buffer = self.create_uniform_buffer(&params, &format!("Box Blur {}", label));
@@ -1480,7 +1567,7 @@ impl GpuGaussianBlur {
             let (_texture2, view2) =
                 self.create_intermediate_texture(down_width, down_height, "Downsampled Blur 2");
             let (output_texture, output_view) =
-                self.create_intermediate_texture(down_width, down_height, "Blurred Downsampled");
+                self.create_output_texture(down_width, down_height, "Blurred Downsampled");
 
             // Apply 6 blur passes
             let blur_passes = [
@@ -1518,6 +1605,9 @@ impl GpuGaussianBlur {
                     radius: *radius,
                     blur_alpha: self.blur_alpha as u32,
                     direction: *direction,
+                    _padding0: 0,
+                    _padding1: 0,
+                    _padding2: 0,
                 };
 
                 let param_buffer = self.create_uniform_buffer(&params, label);
@@ -1596,6 +1686,10 @@ impl GpuGaussianBlur {
                     BindGroupEntry {
                         binding: 2,
                         resource: param_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
                     },
                 ],
             });

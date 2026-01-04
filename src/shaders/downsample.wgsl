@@ -27,6 +27,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
+    // DEBUG: Set top-left pixel to cyan to verify downsample shader execution
+    if dst_x == 0u && dst_y == 0u {
+        textureStore(output_texture, vec2<i32>(0, 0), vec4<f32>(0.0, 1.0, 1.0, 1.0));
+        return;
+    }
+    
+    // DEBUG: Set top-right pixel to magenta
+    if dst_x == params.dst_width - 1u && dst_y == 0u {
+        textureStore(output_texture, vec2<i32>(i32(params.dst_width - 1u), 0), vec4<f32>(1.0, 0.0, 1.0, 1.0));
+        return;
+    }
+    
+    // DEBUG: Set bottom-left pixel to lime green
+    if dst_x == 0u && dst_y == params.dst_height - 1u {
+        textureStore(output_texture, vec2<i32>(0, i32(params.dst_height - 1u)), vec4<f32>(0.5, 1.0, 0.0, 1.0));
+        return;
+    }
+
     // Calculate scale factor (could be 2x, 4x, 8x, etc.)
     let scale_x = f32(params.src_width) / f32(params.dst_width);
     let scale_y = f32(params.src_height) / f32(params.dst_height);

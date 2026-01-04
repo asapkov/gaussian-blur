@@ -1,0 +1,43 @@
+RULES:
+
+1. We use wgpu 0.28.0
+
+2. For wating use EXCATLY this code to avoid errors and warnings:
+
+let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+3. Use EXACTLY this code:
+
+let pipeline_layout =
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(&format_label(label, "Pipeline Layout")),
+        bind_group_layouts: &[layout],
+        immediate_size: 0,
+    });
+
+4. Remove "fn format_pass_label" if it's present and unused.
+
+5. In shaders keep all i32(...) typecasts in the the appropriate places 
+when fixing them. Otherwise we get errors.
+
+6. Use "mipmap_filter: wgpu::MipmapFilterMode::Nearest," instead
+of "mipmap_filter: wgpu::FilterMode::Nearest,".
+
+7. Use "min_binding_size: None,"! Namely None! Example code:
+
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+
+
+

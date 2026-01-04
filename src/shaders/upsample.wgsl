@@ -1,4 +1,4 @@
-// Bilinear upsample shader with variable scale factor
+// Bilinear upsample shader with variable scale factor and debug output
 
 struct UpsampleParams {
     src_width: u32,
@@ -24,6 +24,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     // CRITICAL: Check bounds
     if dst_x >= params.dst_width || dst_y >= params.dst_height {
+        return;
+    }
+
+    // DEBUG: Set top-left pixel to bright red to verify shader execution
+    if dst_x == 0u && dst_y == 0u {
+        textureStore(output_texture, vec2<i32>(0, 0), vec4<f32>(1.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    
+    // DEBUG: Set top-right pixel to bright green
+    if dst_x == params.dst_width - 1u && dst_y == 0u {
+        textureStore(output_texture, vec2<i32>(i32(params.dst_width - 1u), 0), vec4<f32>(0.0, 1.0, 0.0, 1.0));
+        return;
+    }
+    
+    // DEBUG: Set bottom-left pixel to bright blue
+    if dst_x == 0u && dst_y == params.dst_height - 1u {
+        textureStore(output_texture, vec2<i32>(0, i32(params.dst_height - 1u)), vec4<f32>(0.0, 0.0, 1.0, 1.0));
         return;
     }
 
