@@ -3,9 +3,9 @@
 #[cfg(feature = "gpu")]
 use wgpu::{
     util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor,
-    Device, Instance, Limits, PipelineLayout, Queue, ShaderModuleDescriptor, ShaderSource,
-    StorageTextureAccess, TextureDescriptor, TextureFormat, TextureViewDimension,
+    BindGroupLayoutEntry, BindingType, ComputePipeline, ComputePipelineDescriptor, Device,
+    Instance, Queue, ShaderModuleDescriptor, ShaderSource, StorageTextureAccess, TextureDescriptor,
+    TextureFormat, TextureViewDimension,
 };
 
 #[cfg(feature = "gpu")]
@@ -13,40 +13,32 @@ use bytemuck;
 
 use crate::Pixel;
 
-// Constants for optimized work distribution
-const WORKGROUP_SIZE: u32 = 256; // Optimized for shared memory tiling
-const DEBUG_BUFFER_SIZE: usize = 1024;
-const BOX_BLUR_PASSES: u32 = 3;
-
 // Strategy selection thresholds
 const GAUSSIAN_THRESHOLD: f32 = 2.0;
 const DOWNSAMPLE_THRESHOLD: f32 = 32.0;
 const LARGE_SIGMA_THRESHOLD: f32 = 100.0;
 
-// Maximum Gaussian kernel size (256 vec4s = 1024 weights)
-const MAX_GAUSSIAN_KERNEL_SIZE: usize = 1024;
-
 // Shader parameters structs
 #[cfg(feature = "gpu")]
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 struct DownsampleParams {
     src_width: u32,
     src_height: u32,
     dst_width: u32,
     dst_height: u32,
-    _padding: [u32; 4],
+    _padding: [u32; 8], // Adjust to reach 48 bytes
 }
 
 #[cfg(feature = "gpu")]
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 struct UpsampleParams {
     src_width: u32,
     src_height: u32,
     dst_width: u32,
     dst_height: u32,
-    _padding: [u32; 4],
+    _padding: [u32; 8], // Adjust to reach 48 bytes
 }
 
 #[cfg(feature = "gpu")]
@@ -62,7 +54,7 @@ struct BoxBlurParams {
 }
 
 #[cfg(feature = "gpu")]
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 struct GaussianBlurParams {
     width: u32,
@@ -71,7 +63,7 @@ struct GaussianBlurParams {
     blur_alpha: u32,
     direction: u32,
     sigma: f32,
-    _padding: [u32; 2],
+    _padding: [u32; 6], // Adjust to reach 48 bytes
 }
 
 // Gaussian weights struct (256 vec4s = 1024 weights)
@@ -618,6 +610,213 @@ impl GpuGaussianBlur {
         Ok(result)
     }
 
+    /// Test basic GPU write functionality
+    #[cfg(feature = "gpu")]
+    fn test_simple_write(&self, width: usize, height: usize) -> Result<bool, String> {
+        println!("\n=== Testing Simple GPU Write ===");
+
+        // Create a simple test texture
+        let test_texture = self.device.create_texture(&TextureDescriptor {
+            label: Some("Test Texture"),
+            size: wgpu::Extent3d {
+                width: width as u32,
+                height: height as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[TextureFormat::Rgba8Unorm],
+        });
+
+        let test_view = test_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Simple test shader that writes a gradient pattern
+        let test_shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Test Shader"),
+            source: ShaderSource::Wgsl(
+                r#"
+                @group(0) @binding(0)
+                var output_texture: texture_storage_2d<rgba8unorm, write>;
+
+                @compute @workgroup_size(8, 8, 1)
+                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                    let x = global_id.x;
+                    let y = global_id.y;
+                    
+                    // Write gradient pattern
+                    let r = f32(x % 256u) / 255.0;
+                    let g = f32(y % 256u) / 255.0;
+                    let b = 0.5;
+                    let a = 1.0;
+                    
+                    textureStore(output_texture, vec2<i32>(i32(x), i32(y)), vec4<f32>(r, g, b, a));
+                }
+                "#
+                .into(),
+            ),
+        });
+
+        // Create bind group layout
+        let test_bind_group_layout =
+            self.device
+                .create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Test Bind Group Layout"),
+                    entries: &[BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: BindingType::StorageTexture {
+                            access: StorageTextureAccess::WriteOnly,
+                            format: TextureFormat::Rgba8Unorm,
+                            view_dimension: TextureViewDimension::D2,
+                        },
+                        count: None,
+                    }],
+                });
+
+        let test_pipeline_layout =
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Test Pipeline Layout"),
+                    bind_group_layouts: &[&test_bind_group_layout],
+                    immediate_size: 0,
+                });
+
+        let test_pipeline = self
+            .device
+            .create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some("Test Pipeline"),
+                layout: Some(&test_pipeline_layout),
+                module: &test_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let test_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Test Bind Group"),
+            layout: &test_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&test_view),
+            }],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Test Encoder"),
+            });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Test Compute Pass"),
+                timestamp_writes: None,
+            });
+
+            compute_pass.set_pipeline(&test_pipeline);
+            compute_pass.set_bind_group(0, &test_bind_group, &[]);
+
+            // Dispatch enough workgroups to cover the entire image
+            let dispatch_x = (width as u32 + 7) / 8;
+            let dispatch_y = (height as u32 + 7) / 8;
+            println!("Test dispatch: {}x{} workgroups", dispatch_x, dispatch_y);
+            compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+        }
+
+        // Copy to buffer
+        let bytes_per_pixel = 4u32;
+        let alignment = 256;
+        let bytes_per_row_aligned =
+            ((bytes_per_pixel * width as u32 + alignment - 1) / alignment) * alignment;
+        let output_buffer_size =
+            (bytes_per_row_aligned as u64 * height as u64) as wgpu::BufferAddress;
+
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Test Output Buffer"),
+            size: output_buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &test_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row_aligned),
+                    rows_per_image: Some(height as u32),
+                },
+            },
+            wgpu::Extent3d {
+                width: width as u32,
+                height: height as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.queue.submit(Some(encoder.finish()));
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        // Read back
+        let slice = output_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        receiver
+            .recv()
+            .map_err(|e| format!("Failed to receive buffer: {}", e))?
+            .map_err(|e| format!("Failed to map buffer: {}", e))?;
+
+        let data = slice.get_mapped_range();
+
+        // Check first few pixels
+        println!("Test results - First 4 pixels:");
+        for i in 0..4.min(width) {
+            let offset = i * 4;
+            if offset + 3 < data.len() {
+                println!(
+                    "  Pixel {}: R={}, G={}, B={}, A={}",
+                    i,
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3]
+                );
+            }
+        }
+
+        // Check if any pixel is non-zero
+        let mut has_non_zero = false;
+        for &byte in data.iter().take(100.min(data.len())) {
+            if byte != 0 {
+                has_non_zero = true;
+                break;
+            }
+        }
+
+        println!("Test completed. Has non-zero pixels: {}", has_non_zero);
+        Ok(has_non_zero)
+    }
+
     /// Apply blur to an image using GPU with optimal strategy
     pub fn blur_to_bytes(&self, image: &[Vec<Pixel>]) -> Result<(Vec<u8>, usize, usize), String> {
         #[cfg(not(feature = "gpu"))]
@@ -655,6 +854,23 @@ impl GpuGaussianBlur {
                     "Image height {} exceeds GPU texture dimension limit {}",
                     height, device_limits.max_texture_dimension_2d
                 ));
+            }
+
+            // Test basic GPU functionality first
+            println!("Testing basic GPU write functionality...");
+            match self.test_simple_write(width.min(16), height.min(16)) {
+                Ok(true) => println!("✓ GPU write test passed"),
+                Ok(false) => {
+                    println!("✗ GPU write test failed - all pixels are zero!");
+                    return Err(
+                        "GPU write test failed - check shader compilation and texture usage"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    println!("✗ GPU write test error: {}", e);
+                    return Err(format!("GPU write test error: {}", e));
+                }
             }
 
             // Convert image to flat RGBA bytes
@@ -712,24 +928,30 @@ impl GpuGaussianBlur {
 
             let input_view = input_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Execute selected strategy
-            let final_texture = self.device.create_texture(&TextureDescriptor {
-                label: Some("Final Output Texture"),
-                size: wgpu::Extent3d {
-                    width: width as u32,
-                    height: height as u32,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: TextureFormat::Rgba8Unorm,
-                // CRITICAL: Add COPY_SRC
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[TextureFormat::Rgba8Unorm],
-            });
+            // Execute selected strategy and get the actual blurred texture
+            let output_texture = match &self.strategy {
+                BlurStrategy::Gaussian => {
+                    let (_, texture) = self.apply_gaussian_blur(&input_view, width, height)?;
+                    texture
+                }
+                BlurStrategy::Box3Pass => {
+                    let (_, texture) = self.apply_box_blur_3pass(&input_view, width, height)?;
+                    texture
+                }
+                BlurStrategy::Downsample {
+                    factor,
+                    adjusted_sigma,
+                } => {
+                    let (_, texture) = self.apply_downsample_blur_upsample(
+                        &input_view,
+                        width,
+                        height,
+                        *factor,
+                        *adjusted_sigma,
+                    )?;
+                    texture
+                }
+            };
 
             // Copy result to CPU
             println!("\n=== Copying results to CPU ===");
@@ -754,10 +976,10 @@ impl GpuGaussianBlur {
                         label: Some("Final Copy Encoder"),
                     });
 
-            // Copy texture to buffer
+            // Copy texture to buffer - USE THE ACTUAL OUTPUT TEXTURE
             final_encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &final_texture,
+                    texture: &output_texture, // CHANGED: Use output_texture from blur operation
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -779,7 +1001,7 @@ impl GpuGaussianBlur {
 
             // Submit final copy
             self.queue.submit(Some(final_encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             });
@@ -791,7 +1013,7 @@ impl GpuGaussianBlur {
                 sender.send(result).unwrap();
             });
 
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             });
@@ -832,6 +1054,56 @@ impl GpuGaussianBlur {
                 } else {
                     result_bytes.truncate(expected_bytes);
                 }
+            }
+
+            // Analyze output
+            println!("\n=== Output Analysis ===");
+            println!("Image size: {}x{}", width, height);
+            println!("Total bytes: {}", result_bytes.len());
+
+            // Count non-zero pixels
+            let mut non_zero_pixels = 0;
+            let mut total_pixels_checked = 0;
+            let check_limit = 1000.min(width * height);
+
+            for i in 0..check_limit {
+                let offset = i * 4;
+                if offset + 3 < result_bytes.len() {
+                    total_pixels_checked += 1;
+                    if result_bytes[offset] != 0
+                        || result_bytes[offset + 1] != 0
+                        || result_bytes[offset + 2] != 0
+                        || result_bytes[offset + 3] != 0
+                    {
+                        non_zero_pixels += 1;
+
+                        // Print first few non-zero pixels
+                        if non_zero_pixels <= 5 {
+                            println!(
+                                "  Non-zero pixel {}: R={}, G={}, B={}, A={}",
+                                i,
+                                result_bytes[offset],
+                                result_bytes[offset + 1],
+                                result_bytes[offset + 2],
+                                result_bytes[offset + 3]
+                            );
+                        }
+                    }
+                }
+            }
+
+            println!(
+                "Checked {} pixels, {} are non-zero",
+                total_pixels_checked, non_zero_pixels
+            );
+
+            if non_zero_pixels == 0 {
+                println!("⚠️ WARNING: All checked pixels are zero!");
+                println!("Possible issues:");
+                println!("  1. Shader compilation failed");
+                println!("  2. Texture usage flags incorrect");
+                println!("  3. Dispatch size doesn't cover image");
+                println!("  4. Coordinate clamping issues in shader");
             }
 
             // Cleanup - data is automatically unmapped when dropped
@@ -904,7 +1176,9 @@ impl GpuGaussianBlur {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[TextureFormat::Rgba8Unorm],
         });
 
@@ -919,7 +1193,7 @@ impl GpuGaussianBlur {
             blur_alpha: self.blur_alpha as u32,
             direction: 0, // Horizontal
             sigma: self.sigma,
-            _padding: [0; 2],
+            _padding: [0; 6],
         };
 
         let horiz_params_buffer =
@@ -975,7 +1249,7 @@ impl GpuGaussianBlur {
         }
 
         self.queue.submit(Some(horiz_encoder.finish()));
-        self.device.poll(wgpu::PollType::Wait {
+        let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
@@ -989,7 +1263,7 @@ impl GpuGaussianBlur {
             blur_alpha: self.blur_alpha as u32,
             direction: 1, // Vertical
             sigma: self.sigma,
-            _padding: [0; 2],
+            _padding: [0; 6],
         };
 
         let vert_params_buffer =
@@ -1045,7 +1319,7 @@ impl GpuGaussianBlur {
         }
 
         self.queue.submit(Some(vert_encoder.finish()));
-        self.device.poll(wgpu::PollType::Wait {
+        let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
@@ -1114,7 +1388,9 @@ impl GpuGaussianBlur {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[TextureFormat::Rgba8Unorm],
         });
 
@@ -1201,7 +1477,7 @@ impl GpuGaussianBlur {
             }
 
             self.queue.submit(Some(encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             });
@@ -1263,7 +1539,7 @@ impl GpuGaussianBlur {
             src_height: height as u32,
             dst_width: down_width,
             dst_height: down_height,
-            _padding: [0; 4],
+            _padding: [0; 8],
         };
 
         let down_params_buffer =
@@ -1311,11 +1587,15 @@ impl GpuGaussianBlur {
             // Dispatch one workgroup per 8x8 block of downsampled image
             let dispatch_x = (down_width + 7) / 8;
             let dispatch_y = (down_height + 7) / 8;
+            println!(
+                "Downsample dispatch: {}x{} workgroups",
+                dispatch_x, dispatch_y
+            );
             compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
         self.queue.submit(Some(down_encoder.finish()));
-        self.device.poll(wgpu::PollType::Wait {
+        let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
@@ -1465,7 +1745,7 @@ impl GpuGaussianBlur {
             }
 
             self.queue.submit(Some(encoder.finish()));
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             });
@@ -1502,7 +1782,7 @@ impl GpuGaussianBlur {
             src_height: down_height,
             dst_width: width as u32,
             dst_height: height as u32,
-            _padding: [0; 4],
+            _padding: [0; 8],
         };
 
         let up_params_buffer = self
@@ -1550,11 +1830,15 @@ impl GpuGaussianBlur {
             // Dispatch one workgroup per 8x8 block of output image
             let dispatch_x = (width as u32 + 7) / 8;
             let dispatch_y = (height as u32 + 7) / 8;
+            println!(
+                "Upsample dispatch: {}x{} workgroups",
+                dispatch_x, dispatch_y
+            );
             compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
         self.queue.submit(Some(up_encoder.finish()));
-        self.device.poll(wgpu::PollType::Wait {
+        let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });

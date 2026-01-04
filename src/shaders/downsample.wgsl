@@ -1,4 +1,4 @@
-// Optimized 2x2 average downsample shader
+// Simple 2x downsample shader
 
 struct ShaderParameters {
     src_width: u32,
@@ -27,33 +27,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     
-    // Calculate source block coordinates (2x2 average)
-    let src_base_x = dst_x * 2u;
-    let src_base_y = dst_y * 2u;
-
-    var sum = vec4<f32>(0.0);
-    var samples = 0u;
+    // Map to source coordinates (2x2 average)
+    let src_x = dst_x * 2u;
+    let src_y = dst_y * 2u;
     
-    // Average 2x2 block with bounds checking
-    for (var dy = 0u; dy < 2u; dy++) {
-        for (var dx = 0u; dx < 2u; dx++) {
-            let src_x = src_base_x + dx;
-            let src_y = src_base_y + dy;
+    // Sample 2x2 block
+    var sum = vec4<f32>(0.0);
+    var count = 0.0;
 
-            if src_x < params.src_width && src_y < params.src_height {
-                sum += textureLoad(input_texture, vec2<i32>(i32(src_x), i32(src_y)), 0);
-                samples += 1u;
-            }
+    for (var dx = 0u; dx < 2u; dx = dx + 1u) {
+        for (var dy = 0u; dy < 2u; dy = dy + 1u) {
+            let sample_x = min(src_x + dx, params.src_width - 1u);
+            let sample_y = min(src_y + dy, params.src_height - 1u);
+            sum += textureLoad(input_texture, vec2<i32>(i32(sample_x), i32(sample_y)), 0);
+            count += 1.0;
         }
     }
-    
-    // Use if-else instead of ternary operator
-    var avg: vec4<f32>;
-    if samples > 0u {
-        avg = sum / f32(samples);
-    } else {
-        avg = vec4<f32>(0.0);
-    }
 
-    textureStore(output_texture, vec2<u32>(dst_x, dst_y), avg);
+    let result = sum / count;
+    textureStore(output_texture, vec2<i32>(i32(dst_x), i32(dst_y)), result);
 }

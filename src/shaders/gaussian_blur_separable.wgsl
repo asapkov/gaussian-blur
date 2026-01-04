@@ -79,7 +79,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             result.a = original.a;
         }
 
-        textureStore(output_texture, vec2<u32>(x, y), result);
+        textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
     } else {
         // VERTICAL BLUR
         let x = global_id.x;
@@ -131,6 +131,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             result.a = original.a;
         }
 
-        textureStore(output_texture, vec2<u32>(x, y), result);
+        textureStore(output_texture, vec2<i32>(i32(x), i32(y)), result);
     }
 }
